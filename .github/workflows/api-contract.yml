@@ -1,14 +1,17 @@
-# The contract gate for this API. Copy it in as-is — it needs no
-# application changes, only this repo.
+# The contract gate. It runs against whatever document this project is about —
+# `python project.py show` decides that, not a filename written in here — so a
+# fork that points mockd at its own API needs no edits to this file.
 #
-# Three checks, cheapest first, each answering a different question:
-#   1. does the overlay still match the spec?          (drift)
-#   2. does the mock still satisfy the spec?           (self-check)
-#   3. does the deployed backend satisfy it, and do    (live check + saved tests)
+# Four checks, cheapest first, each answering a different question:
+#   1. is the document the one that was pinned?        (provenance)
+#   2. does the overlay still match it?                (drift)
+#   3. does the mock still satisfy it?                 (self-check)
+#   4. does the deployed backend satisfy it, and do    (live check + saved tests)
 #      the team's saved assertions still pass?
 #
-# Steps 1 and 2 need no environment and no secrets, so they run on every PR.
-# Step 3 needs a real URL and credentials, so it runs where those exist.
+# Steps 1-3 need no environment and no secrets, so they run on every PR.
+# Step 4 needs a real URL and credentials, so it runs only where those exist —
+# a repository without them gets a skipped job, not a red one.
 name: API contract
 
 on:
@@ -27,35 +30,71 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install flask flask-cors pyyaml jsonschema
+      - run: pip install -r requirements.txt
 
-      # 0. The spec is an INPUT that decides whether tests pass, so pin it.
+      # Which document is this repository about? Everything below uses the
+      # answer, so a project that has not committed one still gets a real run
+      # against the sample spec rather than a failure about a missing file.
+      - name: Resolve the project spec
+        id: spec
+        run: |
+          SPEC=$(python -c "import project; print(project.active_spec())")
+          echo "spec=$SPEC" >> "$GITHUB_OUTPUT"
+          if [ -f "$SPEC" ]; then
+            echo "present=yes" >> "$GITHUB_OUTPUT"
+            echo "Project spec: $SPEC"
+          else
+            echo "present=no" >> "$GITHUB_OUTPUT"
+            echo "::warning::The project spec ($SPEC) is not in this repository."
+            echo "Commit it, or set one with: python project.py use <file>"
+          fi
+
+      # 1. The spec is an INPUT that decides whether tests pass, so pin it.
       #    Fails if the document is not the one recorded in spec.lock.json —
       #    which is how an older export gets caught instead of quietly making
-      #    a regression disappear.
+      #    a regression disappear. Skipped when nothing has been pinned yet.
       - name: Spec is the pinned one
-        run: python speclock.py check --spec apis.json
+        if: steps.spec.outputs.present == 'yes' && hashFiles('spec.lock.json') != ''
+        run: python speclock.py check --spec "${{ steps.spec.outputs.spec }}"
 
-      # 1. The overlay must know about every operation in the spec. Fails when
+      # 2. The overlay must know about every operation in the spec. Fails when
       #    someone adds an endpoint and nobody curates its payload.
       - name: Overlay is up to date with the spec
-        run: python build_overlay.py --spec apis.json --check
+        if: steps.spec.outputs.present == 'yes' && hashFiles('mock_overlay.json') != ''
+        run: python build_overlay.py --spec "${{ steps.spec.outputs.spec }}" --check
 
-      # 2. The mock answering its own spec. No environment needed — this is the
+      # 3. The mock answering its own spec. No environment needed — this is the
       #    check that catches a spec change breaking the mock.
       - name: Mock self-check
+        if: steps.spec.outputs.present == 'yes'
         run: |
-          python mockd.py --spec apis.json --overlay mock_overlay.json --port 4010 &
-          for i in $(seq 1 40); do curl -sf localhost:4010/_mock/routes >/dev/null && break; sleep 0.25; done
-          python verify.py --spec apis.json --base-url http://localhost:4010 \
+          SPEC="${{ steps.spec.outputs.spec }}"
+          OVERLAY=""
+          [ -f mock_overlay.json ] && OVERLAY="--overlay mock_overlay.json"
+          python mockd.py --spec "$SPEC" $OVERLAY --port 4010 &
+          for i in $(seq 1 60); do
+            curl -sf localhost:4010/_mock/routes >/dev/null && break
+            sleep 0.25
+          done
+          curl -sf localhost:4010/_mock/routes >/dev/null \
+            || { echo "::error::the mock never came up"; exit 1; }
+          python verify.py --spec "$SPEC" --base-url http://localhost:4010 \
                  --quiet --junit mock-selfcheck.xml --fail-on error
 
-      # 3. The saved suites, run against the mock. Every assertion the team
-      #    wrote, on every PR, with no infrastructure.
+      # 4. The saved suites, run against the mock. Every assertion the team
+      #    wrote, on every PR, with no infrastructure. Skipped in a repository
+      #    that has not committed any yet.
       - name: Saved tests against the mock
+        if: steps.spec.outputs.present == 'yes'
         run: |
-          python tests.py run --base-url http://localhost:4010 \
-                 --require-locked-spec --junit tests-mock.xml
+          if ! ls tests/*.json >/dev/null 2>&1; then
+            echo "No shared suites in tests/ — nothing to run."
+            exit 0
+          fi
+          LOCKED=""
+          [ -f spec.lock.json ] && LOCKED="--require-locked-spec"
+          python tests.py run --base-url http://localhost:4010 $LOCKED \
+                 --junit tests-mock.xml
 
       - name: Publish results
         if: always()
@@ -63,10 +102,13 @@ jobs:
         with:
           name: contract-reports
           path: "*.xml"
+          if-no-files-found: ignore
 
   live:
-    # Needs a real environment, so it does not run on forks or on every PR.
-    if: github.event_name != 'pull_request'
+    # Needs a real environment. Without DEV_BASE_URL configured this job is
+    # skipped rather than failed: a repository with no dev backend wired up is
+    # not a broken repository.
+    if: github.event_name != 'pull_request' && vars.DEV_BASE_URL != ''
     runs-on: ubuntu-latest
     environment: dev
     steps:
@@ -74,15 +116,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install flask flask-cors pyyaml jsonschema
+      - run: pip install -r requirements.txt
 
       # Does the deployed backend still match the document it publishes?
       # Upstream is allowed to move — but then the lock has to move too, on
-      # purpose, in a reviewed commit.
+      # purpose, in a reviewed commit. Reported, never fatal.
       - name: Upstream spec still matches the lock
         env:
           DEV_BASE_URL: ${{ vars.DEV_BASE_URL }}
-        run: python speclock.py check --spec "$DEV_BASE_URL/openapi.json" || true
+        run: |
+          [ -f spec.lock.json ] || { echo "Nothing pinned yet."; exit 0; }
+          python speclock.py check --spec "$DEV_BASE_URL/openapi.json" || true
 
       - name: Live contract check
         env:
@@ -99,7 +143,12 @@ jobs:
           DEV_BASE_URL: ${{ vars.DEV_BASE_URL }}
           DEV_USERNAME: ${{ secrets.DEV_USERNAME }}
           DEV_PASSWORD: ${{ secrets.DEV_PASSWORD }}
-        run: python tests.py run --env dev --kind e2e --junit sanity.xml
+        run: |
+          if ! ls tests/*.json >/dev/null 2>&1; then
+            echo "No shared suites to run as sanity flows."
+            exit 0
+          fi
+          python tests.py run --env dev --kind e2e --junit sanity.xml
 
       - name: Publish results
         if: always()
@@ -107,3 +156,4 @@ jobs:
         with:
           name: live-reports
           path: "*.xml"
+          if-no-files-found: ignore
