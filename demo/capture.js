@@ -3,7 +3,7 @@
  *
  * Each frame is a single panel, captured as an element rather than a viewport,
  * so every slide is tight and readable instead of showing whatever happened to
- * be on screen. The PNGs become the pages of the deck troupe narrates.
+ * be on screen. The PNGs become the pages of the narrated deck.
  */
 const { chromium } = require("playwright");
 const EP = require("./endpoints");

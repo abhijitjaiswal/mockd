@@ -945,35 +945,11 @@ POST /_mock/reset    wipe state + log, re-seed
 Every request is logged to `logs/requests.jsonl` with the matched operation, any
 validation violations, the status and the body source.
 
-## Demo
-
-`demo/` captures the console with Playwright and narrates it with
-[troupe](http://127.0.0.1:8788/walkthrough):
-
-```bash
-cd demo && npm install playwright && npx playwright install chromium
-node capture.js                          # 17 slides from the live console
-(cd shots && zip -q ../mockd-demo.zip *.png)
-# upload the zip to troupe's walkthrough bench, paste walkthrough.yaml, render
-```
-
-The result is `demo/mockd-walkthrough.mp4` — 4 minutes 7 seconds across 4
-chapters.
-
-Frames are element screenshots rather than viewports, so each slide is one
-panel. Nothing is mocked up for the camera — the numbers on those slides are
-whatever `apis.json` says at capture time, which is why the narration states
-out loud that 65 of the 96 payloads are inferred.
-
-troupe takes a PDF *or* a `.zip` of slide images. With images there is no text to
-address by name, so every `focus` in the script is a page (`p1` … `p17`) rather
-than a heading. See `demo/README.md`.
-
 ## Test it
 
 ```bash
 ./smoke_test.sh                                          # 14 scenarios, end to end
-python build_overlay.py --spec apis.json --check         # overlay drift
+python build_overlay.py --check                          # overlay drift
 python verify.py --spec apis.json --base-url http://localhost:4010   # mock self-check
 python tests.py run --base-url http://localhost:4010     # the saved suites
 ```
@@ -1049,3 +1025,15 @@ what is still open:
 - Synthesised payloads are *inferred*. They are the right shape far more often
   than not, but they are a guess until the owning team confirms them — which is
   exactly what the `synthesized` flag in the overlay and `/_mock/drift` are for.
+
+## Licence
+
+[Apache License 2.0](LICENSE). Use it, change it, ship it, sell it — the one
+condition is attribution, and that condition holds for commercial use too.
+
+Section 4(d) of the licence requires that any derivative work you distribute
+carries a readable copy of the [NOTICE](NOTICE) file, which names the author
+and this repository. So if you build a product on this, the credit travels with
+it: in your documentation, your about screen, or your third-party notices.
+
+You may add your own notices alongside; you may not remove the existing one.
