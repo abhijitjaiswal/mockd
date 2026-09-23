@@ -1,0 +1,100 @@
+# A walkthrough of the mockd console, captured with Playwright.
+#
+# The document is a .zip of 17 slide images, so there are no headings to address
+# by name — every focus is a page.
+
+defaults: {lang: en-us, voice: storyteller}
+
+theme:
+  bg: "#0f1318"
+
+chapters:
+  - title: The problem
+    focus: "p1"
+    lines:
+      - text: Three teams share one API. The backend has the code, the interface
+              team has whatever they saw when they integrated, and QA has its own
+              fixtures.
+      - text: The document meant to reconcile them describes about a third of it.
+      - focus: "p2"
+        text: This is that document, graded. Ninety-six operations. Thirty are
+              declared by a schema. One has an example but nothing a machine can
+              check against.
+      - text: Sixty-five say nothing at all about what they return.
+      - text: The bar underneath is the same fact as a proportion, and the ladder
+              below it is where each payload actually comes from — declared by
+              the spec, verified against a real environment, agreed by a human,
+              or still a guess.
+      - focus: "p3"
+        text: Every gap is named rather than counted, so it reads as a worklist
+              for whoever owns the endpoint.
+
+  - title: For the interface team
+    focus: "p4"
+    lines:
+      - text: A mock server answers all ninety-six, including the sixty-five the
+              document never described. Those payloads are inferred, and the
+              console says so rather than pretending otherwise.
+      - focus: "p5"
+        text: One base URL, and the snippets to paste into whatever the app
+              already uses. Cross-origin requests are open, so no proxy is needed.
+      - focus: "p6"
+        text: A wrong request comes back in the shape the real backend uses, not
+              an invented one. Error handling written against the mock still works
+              the day it meets production.
+      - text: This API has two different error contracts across its modules. The
+              mock mirrors whichever one each operation declares.
+      - focus: "p7"
+        text: Not every endpoint deserves the same attention, so each is marked.
+              The fully specified ones sort to the top.
+      - focus: "p8"
+        text: A real payload, with the right field names and plausible values.
+      - focus: "p9"
+        text: Any documented status on demand — a five hundred without breaking
+              anything to get one.
+      - focus: "p10"
+        text: An empty list, which is the state interfaces forget, without
+              emptying a database to see it.
+
+  - title: For QA
+    focus: "p11"
+    lines:
+      - text: Writing assertions from a blank page is why test suites do not get
+              written.
+      - focus: "p12"
+        text: So the console reads the response that just came back and proposes
+              the assertions. Tick the ones that matter.
+      - text: It also spots the identifiers worth capturing, which is how a test
+              for an endpoint that needs existing data gets its data.
+      - focus: "p13"
+        text: Saved tests carry no host and no token. Everything that changes
+              between servers is a variable, so anybody can run them anywhere.
+      - text: A new test lands in a draft workspace that CI never runs. It can
+              only move into the shared suite once it has actually passed.
+      - focus: "p14"
+        text: One button, any environment, the same test data.
+      - text: A scenario whose setup fails reports the endpoint under test as
+              blocked rather than failed, because it never ran. Nobody should
+              spend an afternoon debugging a call that was never made.
+      - focus: "p15"
+        text: Tests increasingly arrive as pasted text, from a colleague or from
+              an assistant. They all come through one door that validates them
+              before anything is written.
+      - text: A step that uses data no earlier step produces is caught here,
+              rather than at three in the morning in a pipeline.
+
+  - title: For the backend, and for CI
+    focus: "p16"
+    lines:
+      - text: The same document, pointed at a real environment, answers a
+              different question — does the deployed service still match what it
+              publishes.
+      - focus: "p17"
+        text: Environments are named once. Credentials never live in the
+              repository; the file holds the shape and the secret comes from the
+              shell or the pipeline.
+      - text: Three checks run on every merge and need no environment at all —
+              the overlay still matches the spec, the mock still satisfies it,
+              and every assertion the team wrote still passes.
+      - text: The document was only ever a third complete. The difference is that
+              now everybody can see which third.

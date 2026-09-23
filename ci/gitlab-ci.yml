@@ -1,0 +1,38 @@
+# Drop into .gitlab-ci.yml, or `include:` it. No application changes needed.
+# Same three checks as the GitHub workflow: drift, mock self-check, live check.
+stages: [contract, live]
+
+default:
+  image: python:3.12-slim
+  before_script:
+    - pip install --quiet flask flask-cors pyyaml jsonschema
+
+contract:
+  stage: contract
+  script:
+    - python speclock.py check --spec apis.json
+    - python build_overlay.py --spec apis.json --check
+    - python mockd.py --spec apis.json --overlay mock_overlay.json --port 4010 &
+    - for i in $(seq 1 40); do curl -sf localhost:4010/_mock/routes > /dev/null && break; sleep 0.25; done
+    - python verify.py --spec apis.json --base-url http://localhost:4010 --quiet --junit mock-selfcheck.xml --fail-on error
+    - python tests.py run --base-url http://localhost:4010 --require-locked-spec --junit tests-mock.xml
+  artifacts:
+    when: always
+    reports:
+      junit: "*.xml"
+
+live:
+  stage: live
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  variables:
+    DEV_BASE_URL: $DEV_BASE_URL       # project variable
+  script:
+    # DEV_USERNAME / DEV_PASSWORD are masked CI variables, never in the repo
+    - python verify.py --spec "$DEV_BASE_URL/openapi.json" --env dev --quiet --junit live-contract.xml --fail-on error
+    - python tests.py run --env dev --kind e2e --junit sanity.xml
+  artifacts:
+    when: always
+    reports:
+      junit: "*.xml"

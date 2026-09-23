@@ -1,0 +1,39 @@
+# --- never commit: secrets -------------------------------------------------
+.env
+environments.local.json
+
+# --- never commit: your API's own documents --------------------------------
+# The tool is generic; the document it points at is yours. Fetched and
+# uploaded specs land in specs/, and the overlay is generated from them.
+specs/
+apis.json
+mock_overlay.json
+learned_overlay.json
+spec.lock.json
+clavis.json
+
+# --- working state ---------------------------------------------------------
+tests/drafts/
+.clavis-console.json
+logs/
+server.log
+verify_report.*
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# --- demo artefacts --------------------------------------------------------
+demo/node_modules/
+demo/shots/
+demo/*.mp4
+demo/*.zip
+
+# --- editors and OS --------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+
+# --- generated from your API, not part of the tool -------------------------
+*.postman_collection.json
+tests/*.json

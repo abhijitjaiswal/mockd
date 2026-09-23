@@ -1,0 +1,23 @@
+const { chromium } = require("playwright");
+const path = require("path");
+(async () => {
+  const b = await chromium.launch();
+  const c = await b.newContext({ viewport:{width:1500,height:1000}, deviceScaleFactor:2, colorScheme:"light" });
+  const p = await c.newPage();
+  const errs=[]; p.on("pageerror",e=>errs.push(e.message));
+  await p.goto("http://localhost:4100",{waitUntil:"networkidle"});
+  await p.waitForTimeout(2500);
+  await p.locator('nav.side a[data-view="explore"]').click(); await p.waitForTimeout(700);
+  await p.locator("#method").selectOption("GET");
+  await p.locator("#path").fill("/api/v1/user/list");
+  await p.locator("#btnSend").click(); await p.waitForTimeout(1200);
+  await p.locator("#btnSaveTest").click(); await p.waitForTimeout(1200);
+  console.log("  section default :", await p.locator("#dlgSuite").inputValue());
+  console.log("  test id         :", await p.locator("#dlgId").inputValue());
+  console.log("  name            :", await p.locator("#dlgName").inputValue());
+  console.log("  labels on       :", await p.locator("#dlgTags .chip.on").allTextContents());
+  console.log("  destination     :", (await p.locator("#dlgWhere").textContent()).trim().slice(0,110));
+  await p.locator("#saveDlg").screenshot({ path: path.join(__dirname,"ui","savedlg.png") });
+  console.log(errs.length ? "JS ERRORS: "+errs.join("; ") : "  no JS errors");
+  await b.close();
+})();

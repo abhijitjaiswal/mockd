@@ -1,0 +1,6 @@
+# mockd — runtime dependencies. Nothing else is needed; everything the tools
+# import beyond these is in the Python standard library.
+flask>=3.0
+flask-cors>=4.0
+pyyaml>=6.0
+jsonschema>=4.18      # Draft 2020-12, for OpenAPI 3.1 schemas

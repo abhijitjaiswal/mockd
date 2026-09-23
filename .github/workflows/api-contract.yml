@@ -1,0 +1,109 @@
+# The contract gate for this API. Copy it in as-is — it needs no
+# application changes, only this repo.
+#
+# Three checks, cheapest first, each answering a different question:
+#   1. does the overlay still match the spec?          (drift)
+#   2. does the mock still satisfy the spec?           (self-check)
+#   3. does the deployed backend satisfy it, and do    (live check + saved tests)
+#      the team's saved assertions still pass?
+#
+# Steps 1 and 2 need no environment and no secrets, so they run on every PR.
+# Step 3 needs a real URL and credentials, so it runs where those exist.
+name: API contract
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1-5"   # weekday sanity run against dev
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install flask flask-cors pyyaml jsonschema
+
+      # 0. The spec is an INPUT that decides whether tests pass, so pin it.
+      #    Fails if the document is not the one recorded in spec.lock.json —
+      #    which is how an older export gets caught instead of quietly making
+      #    a regression disappear.
+      - name: Spec is the pinned one
+        run: python speclock.py check --spec apis.json
+
+      # 1. The overlay must know about every operation in the spec. Fails when
+      #    someone adds an endpoint and nobody curates its payload.
+      - name: Overlay is up to date with the spec
+        run: python build_overlay.py --spec apis.json --check
+
+      # 2. The mock answering its own spec. No environment needed — this is the
+      #    check that catches a spec change breaking the mock.
+      - name: Mock self-check
+        run: |
+          python mockd.py --spec apis.json --overlay mock_overlay.json --port 4010 &
+          for i in $(seq 1 40); do curl -sf localhost:4010/_mock/routes >/dev/null && break; sleep 0.25; done
+          python verify.py --spec apis.json --base-url http://localhost:4010 \
+                 --quiet --junit mock-selfcheck.xml --fail-on error
+
+      # 3. The saved suites, run against the mock. Every assertion the team
+      #    wrote, on every PR, with no infrastructure.
+      - name: Saved tests against the mock
+        run: |
+          python tests.py run --base-url http://localhost:4010 \
+                 --require-locked-spec --junit tests-mock.xml
+
+      - name: Publish results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-reports
+          path: "*.xml"
+
+  live:
+    # Needs a real environment, so it does not run on forks or on every PR.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install flask flask-cors pyyaml jsonschema
+
+      # Does the deployed backend still match the document it publishes?
+      # Upstream is allowed to move — but then the lock has to move too, on
+      # purpose, in a reviewed commit.
+      - name: Upstream spec still matches the lock
+        env:
+          DEV_BASE_URL: ${{ vars.DEV_BASE_URL }}
+        run: python speclock.py check --spec "$DEV_BASE_URL/openapi.json" || true
+
+      - name: Live contract check
+        env:
+          DEV_BASE_URL: ${{ vars.DEV_BASE_URL }}
+          DEV_USERNAME: ${{ secrets.DEV_USERNAME }}
+          DEV_PASSWORD: ${{ secrets.DEV_PASSWORD }}
+        run: |
+          python verify.py --spec "$DEV_BASE_URL/openapi.json" --env dev \
+                 --quiet --junit live-contract.xml --fail-on error
+
+      # End-to-end sanity: the flows a human would click through.
+      - name: Sanity flows
+        env:
+          DEV_BASE_URL: ${{ vars.DEV_BASE_URL }}
+          DEV_USERNAME: ${{ secrets.DEV_USERNAME }}
+          DEV_PASSWORD: ${{ secrets.DEV_PASSWORD }}
+        run: python tests.py run --env dev --kind e2e --junit sanity.xml
+
+      - name: Publish results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-reports
+          path: "*.xml"

@@ -1,0 +1,107 @@
+openapi: 3.0.3
+info:
+  title: Orders API (sample)
+  version: 1.0.0
+paths:
+  /orders:
+    get:
+      summary: List orders
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, paid, shipped, cancelled]
+      responses:
+        "200":
+          description: List of orders
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Order"
+    post:
+      summary: Create order
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewOrder"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+        "400":
+          description: Invalid input
+          content:
+            application/json:
+              example: {error: "validation failed"}
+  /orders/{orderId}:
+    get:
+      summary: Get order
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: An order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+              examples:
+                paid:
+                  value: {id: "ord_1", item: "keyboard", quantity: 1, status: paid, amount: 2499.0}
+                cancelled:
+                  value: {id: "ord_2", item: "mouse", quantity: 2, status: cancelled, amount: 998.0}
+        "404":
+          description: Not found
+          content:
+            application/json:
+              example: {error: "order not found"}
+    delete:
+      summary: Delete order
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          description: Not found
+components:
+  schemas:
+    NewOrder:
+      type: object
+      required: [item, quantity]
+      properties:
+        item:
+          type: string
+          minLength: 1
+        quantity:
+          type: integer
+          minimum: 1
+        amount:
+          type: number
+    Order:
+      allOf:
+        - $ref: "#/components/schemas/NewOrder"
+        - type: object
+          required: [id, status]
+          properties:
+            id:
+              type: string
+            status:
+              type: string
+              enum: [pending, paid, shipped, cancelled]

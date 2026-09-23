@@ -1,0 +1,1028 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>mockd console</title>
+<style>
+  :root{
+    --bg:#f5f6f8; --panel:#fff; --line:#e3e6ea; --ink:#15181c; --muted:#68717d;
+    --accent:#2f6df6; --ok:#0f8a4d; --warn:#a96a00; --err:#c33; --code:#f3f5f8;
+    --sidebar:#fbfbfc;
+    --shadow:0 1px 2px rgba(20,24,28,.05), 0 1px 12px rgba(20,24,28,.04);
+    --topbar:56px; --nav:212px;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#101317; --panel:#181c21; --line:#282e36; --ink:#e6eaef; --muted:#909aa6;
+           --accent:#6f9bff; --ok:#3fbf7f; --warn:#e0a13a; --err:#ff6b6e; --code:#0d1013;
+           --sidebar:#14171b;
+           --shadow:0 1px 2px rgba(0,0,0,.4), 0 1px 12px rgba(0,0,0,.25); }
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  code,pre,input,select,textarea{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+
+  /* ---------------- shell ---------------- */
+  .topbar{position:fixed;inset:0 0 auto 0;height:var(--topbar);z-index:30;
+          display:flex;align-items:center;gap:12px;padding:0 16px;
+          background:var(--panel);border-bottom:1px solid var(--line)}
+  .brand{font-weight:700;font-size:14.5px;letter-spacing:-.2px}
+  .grow{flex:1}
+  nav.side{position:fixed;top:var(--topbar);bottom:0;left:0;width:var(--nav);z-index:20;
+           background:var(--sidebar);border-right:1px solid var(--line);
+           padding:12px 10px;overflow:auto}
+  nav.side .group{font-size:10.5px;font-weight:700;letter-spacing:.9px;text-transform:uppercase;
+                  color:var(--muted);padding:12px 10px 5px}
+  nav.side a{display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:7px;
+             color:var(--ink);text-decoration:none;font-size:13.5px;font-weight:500;
+             cursor:pointer;border:1px solid transparent}
+  nav.side a:hover{background:var(--code)}
+  nav.side a.on{background:color-mix(in srgb,var(--accent) 12%,transparent);
+                border-color:color-mix(in srgb,var(--accent) 26%,transparent);
+                color:var(--accent);font-weight:650}
+  nav.side a .n{margin-left:auto;font-size:10.5px;color:var(--muted);font-weight:600}
+  nav.side a.on .n{color:inherit}
+  main{margin:var(--topbar) 0 0 var(--nav);padding:20px 22px 60px;max-width:1520px}
+  @media (max-width:980px){
+    nav.side{position:static;width:auto;height:auto;border-right:0;
+             border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:4px;padding:8px}
+    nav.side .group{display:none}
+    main{margin:0;padding:14px}
+    .topbar{position:sticky}
+  }
+  .view{display:none} .view.on{display:block}
+  .view > header{margin:0 0 16px}
+  .view > header h2{margin:0;font-size:20px;font-weight:680;letter-spacing:-.3px}
+  .view > header p{margin:5px 0 0;color:var(--muted);font-size:13px;max-width:80ch}
+
+  /* ---------------- pieces ---------------- */
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:11px;
+        box-shadow:var(--shadow);overflow:hidden;margin-bottom:16px}
+  .card > h3{margin:0;padding:11px 14px;font-size:11.5px;font-weight:700;
+             text-transform:uppercase;letter-spacing:.8px;color:var(--muted);
+             border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
+  .body{padding:14px}
+  .cols{display:grid;grid-template-columns:minmax(340px,430px) 1fr;gap:16px;align-items:start}
+  @media (max-width:1100px){ .cols{grid-template-columns:1fr} }
+  .sticky{position:sticky;top:calc(var(--topbar) + 16px)}
+  @media (max-width:1100px){ .sticky{position:static} }
+
+  button{font:inherit;font-weight:600;padding:7px 13px;border-radius:7px;cursor:pointer;
+         border:1px solid var(--line);background:var(--panel);color:var(--ink)}
+  button:hover:not(:disabled){border-color:var(--accent)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  button.danger{color:var(--err)}
+  button.sm{padding:4px 9px;font-size:12px;font-weight:500}
+  .btnrow{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px}
+  label{display:block;font-size:12px;color:var(--muted);margin:10px 0 3px;font-weight:600}
+  .body > label:first-child{margin-top:0}
+  input[type=text],input[type=number],select,textarea{
+     width:100%;padding:6px 9px;border:1px solid var(--line);border-radius:7px;
+     background:var(--bg);color:var(--ink);font-size:12.5px}
+  textarea{resize:vertical}
+  .check{display:flex;align-items:flex-start;gap:8px;margin:7px 0;font-size:12.5px}
+  .check input{margin:3px 0 0}
+  .check label{margin:0;color:var(--ink);font-weight:500}
+  .row{display:flex;gap:10px} .row > *{flex:1}
+  .hint{font-size:11.5px;color:var(--muted);margin-top:7px;line-height:1.5}
+  .quick{display:flex;gap:6px;flex-wrap:wrap;margin-top:7px}
+  pre{margin:0;padding:12px 14px;background:var(--code);overflow:auto;font-size:12px;
+      line-height:1.55;max-height:420px;white-space:pre-wrap;word-break:break-word}
+  table{width:100%;border-collapse:collapse;font-size:11.5px}
+  td{padding:4px 6px;border-bottom:1px solid var(--line);vertical-align:top}
+  td:first-child{color:var(--muted);white-space:nowrap;width:1%}
+  .empty{padding:24px 14px;color:var(--muted);font-size:12.5px;text-align:center}
+  .tag{font-size:10px;color:var(--muted);border:1px solid var(--line);border-radius:5px;
+       padding:1px 5px;white-space:nowrap}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;
+        font-size:12px;font-weight:600;border:1px solid var(--line)}
+  .pill .dot{width:7px;height:7px;border-radius:50%;background:currentColor}
+  .pill.on{color:var(--ok)} .pill.off{color:var(--muted)}
+  .banner{padding:10px 14px;font-size:12.5px;border-bottom:1px solid var(--line)}
+  .banner.err{color:var(--err)} .banner.ok{color:var(--ok)}
+
+  /* Sits above every view, so a message never lands on a page you are not on. */
+  /* an author display: beats the UA's [hidden] rule, so say it explicitly */
+  #toast[hidden]{display:none}
+  #toast{position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:60;
+         max-width:min(720px,calc(100vw - 32px));display:flex;gap:10px;align-items:flex-start;
+         padding:10px 12px;border:1px solid var(--line);border-radius:8px;
+         background:var(--panel);box-shadow:0 6px 22px rgba(0,0,0,.18);
+         font-size:12.5px;line-height:1.45}
+  #toast.err{border-color:var(--err);color:var(--err)}
+  #toast.ok{border-color:var(--ok);color:var(--ok)}
+  #toastText{flex:1;min-width:0;overflow-wrap:anywhere}
+  #toastClose{background:none;border:none;color:inherit;cursor:pointer;
+              font-size:15px;line-height:1;padding:0 2px;opacity:.7}
+  #toastClose:hover{opacity:1}
+
+  .m{font-weight:700;font-size:10px;padding:2px 5px;border-radius:4px;min-width:50px;
+     text-align:center;border:1px solid var(--line)}
+  .m.GET{color:var(--ok)} .m.POST{color:var(--accent)} .m.PUT,.m.PATCH{color:var(--warn)}
+  .m.DELETE{color:var(--err)}
+  .ops{max-height:min(62vh,700px);overflow:auto;border-top:1px solid var(--line)}
+  .op{display:flex;align-items:center;gap:7px;padding:6px 12px;cursor:pointer;
+      border-bottom:1px solid var(--line);font-size:12px}
+  .op:hover{background:var(--code)}
+  .op.sel{background:color-mix(in srgb,var(--accent) 13%,transparent)}
+  /* dir=rtl keeps the END of a long path visible — the part that differs */
+  .op .p{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+         font-family:ui-monospace,Menlo,monospace;text-align:left}
+  .op .mark{width:16px;flex:0 0 16px;text-align:center}
+  .op .curl{opacity:0;font-size:10px;padding:2px 6px;transition:opacity .12s}
+  .op:hover .curl{opacity:1}
+  .op .curl.copied{opacity:1}
+  .status{font-weight:700;font-size:22px}
+  .s2{color:var(--ok)} .s3{color:var(--accent)} .s4{color:var(--warn)} .s5{color:var(--err)}
+  .meta{display:flex;gap:14px;align-items:baseline;flex-wrap:wrap;color:var(--muted);font-size:12px}
+
+  /* coverage */
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(176px,1fr));gap:11px}
+  .tile{border:1px solid var(--line);border-radius:9px;padding:12px 14px;background:var(--bg)}
+  .tile .n{font-size:28px;font-weight:700;line-height:1.1;letter-spacing:-.6px}
+  .tile .k{font-size:11.5px;font-weight:650;text-transform:uppercase;letter-spacing:.6px;
+           color:var(--muted);margin-top:2px}
+  .tile .d{font-size:11.5px;color:var(--muted);margin-top:6px;line-height:1.45}
+  .tile.good .n{color:var(--ok)} .tile.bad .n{color:var(--err)}
+  .tile.mid .n{color:var(--warn)} .tile.info .n{color:var(--accent)}
+  .bar{display:flex;height:9px;border-radius:5px;overflow:hidden;margin:15px 0 6px;
+       border:1px solid var(--line)}
+  .bar span{display:block}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:11.5px;color:var(--muted)}
+  .legend b{color:var(--ink)}
+  .sw{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px}
+  .dims{display:grid;grid-template-columns:repeat(auto-fit,minmax(255px,1fr));gap:11px;
+        margin-top:14px}
+  .dim{border:1px solid var(--line);border-radius:9px;padding:11px 13px;background:var(--bg)}
+  .dim h4{margin:0 0 8px;font-size:11.5px;font-weight:700;text-transform:uppercase;
+          letter-spacing:.6px;color:var(--muted)}
+  .dim table{font-size:12px} .dim td{border:0;padding:2px 0}
+  .dim td:last-child{text-align:right;font-weight:650;width:1%;white-space:nowrap}
+  details{margin-top:13px;border-top:1px solid var(--line);padding-top:11px}
+  summary{cursor:pointer;font-size:12.5px;font-weight:650;color:var(--accent)}
+  .oplist{margin-top:10px;max-height:300px;overflow:auto;border:1px solid var(--line);
+          border-radius:8px}
+  .oplist .op{cursor:default}
+  .why{font-size:10.5px;color:var(--err);white-space:nowrap}
+  .legend2{font-size:12px;line-height:1.65;margin-top:8px}
+  .legend2 .row2{display:flex;gap:8px;align-items:baseline}
+  .legend2 .mark{width:16px;flex:0 0 16px;text-align:center}
+  .legend2 .what{color:var(--muted)}
+  .filterbtn{font-size:10.5px;padding:2px 8px}
+  .filterbtn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+  .rule{border:1px solid var(--line);border-radius:9px;margin-bottom:10px;overflow:hidden;
+        background:var(--bg)}
+  .rule > .head{display:flex;align-items:center;gap:10px;padding:10px 12px}
+  .rule .code{font-size:11px;font-weight:700;letter-spacing:.5px;min-width:26px;color:var(--muted)}
+  .rule .t{flex:1;font-size:13px;font-weight:600}
+  .rule .why{display:block;font-size:11.5px;color:var(--muted);font-weight:400;margin-top:2px;
+             white-space:normal}
+  .rule .score{font-size:11.5px;font-weight:700;white-space:nowrap}
+  .rule.pass .score{color:var(--ok)} .rule.fail .score{color:var(--err)}
+  .rule .detail{padding:0 12px 10px;font-size:11.5px;color:var(--muted)}
+  .rule .offenders{margin:0 12px 10px;max-height:190px;overflow:auto;border:1px solid var(--line);
+                   border-radius:7px;background:var(--panel)}
+  .rule .offenders div{padding:3px 10px;font-size:11px;border-bottom:1px solid var(--line);
+                       font-family:ui-monospace,Menlo,monospace}
+  .rule .offenders div:last-child{border-bottom:0}
+
+  /* connect */
+  .url{display:flex;align-items:center;gap:11px;flex-wrap:wrap;background:var(--code);
+       border:1px solid var(--line);border-radius:9px;padding:13px 15px}
+  .url code{font-size:19px;font-weight:650;letter-spacing:-.2px;color:var(--accent)}
+  .url .lbl{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;
+            color:var(--muted)}
+  .snips{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:11px;
+         margin-top:14px}
+  .snip{border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--bg)}
+  .snip h4{margin:0;padding:8px 12px;font-size:11px;font-weight:700;text-transform:uppercase;
+           letter-spacing:.6px;color:var(--muted);border-bottom:1px solid var(--line);
+           display:flex;align-items:center;gap:8px}
+  .snip pre{max-height:200px;font-size:11.5px;padding:10px 12px;background:transparent}
+  .facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:11px;
+         margin-top:14px}
+  .fact{border:1px solid var(--line);border-radius:9px;padding:11px 13px;background:var(--bg);
+        font-size:12px}
+  .fact b{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.6px;
+          color:var(--muted);margin-bottom:5px;font-weight:700}
+  .copied{color:var(--ok);font-size:11px;font-weight:650}
+
+  /* ---------------- saved tests ---------------- */
+  .suite{border:1px solid var(--line);border-radius:10px;margin-bottom:12px;overflow:hidden;
+         background:var(--bg)}
+  .suite > header{display:flex;align-items:center;gap:9px;padding:9px 12px;
+                  background:var(--panel);border-bottom:1px solid var(--line)}
+  .suite > header .name{font-weight:680;font-size:13px}
+  .stage{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;
+         padding:2px 7px;border-radius:999px;border:1px solid currentColor}
+  .stage.shared{color:var(--ok)} .stage.draft{color:var(--warn)}
+  .titem{border-bottom:1px solid var(--line)}
+  .titem:last-child{border-bottom:0}
+  .titem > .head{display:flex;align-items:center;gap:9px;padding:8px 12px}
+  .titem .kind{font-size:9.5px;font-weight:700;padding:2px 6px;border-radius:4px;
+               border:1px solid currentColor;min-width:44px;text-align:center}
+  .kind.case{color:var(--accent)} .kind.api{color:var(--warn)} .kind.e2e{color:var(--ok)}
+  .titem .label{flex:1;min-width:0}
+  .titem .label .t{font-size:12.5px;font-weight:550;overflow:hidden;
+                   text-overflow:ellipsis;white-space:nowrap}
+  .titem .label .sub{font-size:10.5px;color:var(--muted);font-family:ui-monospace,Menlo,monospace}
+  .outcome{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;
+           padding:2px 7px;border-radius:999px;border:1px solid currentColor}
+  .outcome.pass{color:var(--ok)} .outcome.fail,.outcome.error{color:var(--err)}
+  .outcome.blocked{color:var(--warn)} .outcome.never{color:var(--muted)}
+  .tacts{display:flex;gap:5px;opacity:0;transition:opacity .12s}
+  .titem:hover .tacts{opacity:1}
+  .steps{margin:0 12px 10px 12px;border:1px solid var(--line);border-radius:8px;
+         background:var(--panel);overflow:hidden}
+  .stepline{display:flex;align-items:center;gap:8px;padding:5px 10px;font-size:11.5px;
+            border-bottom:1px solid var(--line)}
+  .stepline:last-child{border-bottom:0}
+  .role{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;
+        min-width:48px;text-align:center;padding:1px 5px;border-radius:4px;
+        border:1px solid var(--line);color:var(--muted)}
+  .role.target{color:var(--accent);border-color:currentColor}
+  .stepline .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .arrow{color:var(--muted);font-size:10.5px;white-space:nowrap}
+
+  dialog{border:1px solid var(--line);border-radius:12px;background:var(--panel);
+         color:var(--ink);max-width:740px;width:92vw;padding:0;box-shadow:var(--shadow)}
+  dialog::backdrop{background:rgba(0,0,0,.5)}
+  dialog h3{margin:0;padding:13px 16px;font-size:13px;font-weight:700;
+            border-bottom:1px solid var(--line)}
+  dialog .body{max-height:66vh;overflow:auto}
+  .arow{display:flex;gap:9px;align-items:center;padding:6px 0;font-size:12px;
+        border-bottom:1px solid var(--line)}
+  .arow input[type=checkbox]{margin:0}
+  .arow code{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .chip{font-size:11px;padding:3px 10px;border-radius:999px;cursor:pointer;
+        border:1px solid var(--line);background:var(--panel);color:var(--muted);
+        font-weight:600}
+  .chip.on{background:var(--accent);border-color:var(--accent);color:#fff}
+  .arow2{display:flex;gap:6px;align-items:center;padding:4px 0;
+         border-bottom:1px solid var(--line)}
+  .arow2:last-child{border-bottom:0}
+  .arow2 select,.arow2 input{font-size:11.5px;padding:4px 7px}
+  .arow2 .a-type{flex:0 0 116px}
+  .arow2 .a-path{flex:1 1 150px;min-width:90px}
+  .arow2 .a-op{flex:0 0 112px}
+  .arow2 .a-value{flex:1 1 120px;min-width:80px}
+  .arow2 .a-del{flex:0 0 auto;font-size:10.5px;padding:3px 7px}
+  .arow2 [hidden]{display:none!important}
+  .tryout{border-top:1px solid var(--line);padding:11px 16px;max-height:230px;overflow:auto;
+          background:var(--code)}
+  .tryline{display:flex;gap:9px;align-items:baseline;font-size:11.5px;padding:2px 0}
+  .tryline .v{font-weight:700;font-size:10px;min-width:34px;text-align:center;
+              border-radius:4px;padding:1px 4px;border:1px solid currentColor}
+  .tryline.ok .v{color:var(--ok)} .tryline.no .v{color:var(--err)}
+  .tryline .d{color:var(--muted)}
+  .runrows{max-height:420px;overflow:auto}
+  .runrow{display:flex;gap:9px;align-items:baseline;padding:3px 14px;font-size:11.5px;
+          border-bottom:1px solid var(--line);font-family:ui-monospace,Menlo,monospace}
+  .runrow:last-child{border-bottom:0}
+  .runrow .v{font-weight:700;font-size:9.5px;min-width:40px;text-align:center;
+             border-radius:4px;padding:1px 4px;border:1px solid currentColor}
+  .runrow.pass .v{color:var(--ok)} .runrow.fail .v{color:var(--err)}
+  .runrow.warn .v{color:var(--warn)} .runrow.block .v{color:var(--warn)}
+  .runrow .code{min-width:32px;text-align:right;color:var(--muted)}
+  .runrow .ms{min-width:52px;text-align:right;color:var(--muted)}
+  .runrow .what{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .runphase{padding:6px 14px 3px;font-size:11px;font-weight:700;letter-spacing:.5px;
+            text-transform:uppercase;color:var(--muted);background:var(--code)}
+  .runnote{padding:3px 14px;font-size:11.5px;color:var(--muted)}
+  .runrow .why2{color:var(--muted);font-size:10.5px;max-width:42%;overflow:hidden;
+                text-overflow:ellipsis;white-space:nowrap}
+  .runlegend{display:flex;flex-direction:column;gap:2px;padding:8px 14px;
+             border-bottom:1px solid var(--line);font-size:11px;color:var(--muted);
+             background:var(--code)}
+  .runlegend b{font-family:ui-monospace,Menlo,monospace;font-size:10px}
+  .runlegend b.pass{color:var(--ok)} .runlegend b.warn{color:var(--warn)}
+  .runlegend b.fail{color:var(--err)}
+  .runrow.inflight{background:color-mix(in srgb,var(--warn) 10%,transparent)}
+  .runrow.inflight .v{color:var(--warn);border-color:currentColor}
+  .runrow.inflight .ms{color:var(--warn);font-weight:700}
+  .opspick{max-height:210px;overflow:auto;border:1px solid var(--line);border-radius:8px;
+           margin-top:7px;background:var(--bg)}
+  .opspick label{display:flex;gap:8px;align-items:center;padding:3px 9px;margin:0;
+                 font-size:11.5px;font-weight:400;color:var(--ink);cursor:pointer;
+                 border-bottom:1px solid var(--line)}
+  .opspick label:last-child{border-bottom:0}
+  .opspick label:hover{background:var(--code)}
+  .opspick input{margin:0}
+  .opspick .p{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+              font-family:ui-monospace,Menlo,monospace}
+  .opspick .stream{color:var(--warn);font-size:10px}
+  .varrow{padding:8px 0;border-bottom:1px solid var(--line)}
+  .varrow:last-child{border-bottom:0}
+  .varrow .n{display:flex;gap:9px;align-items:baseline;font-size:12px;font-weight:650}
+  .varrow .n code{font-family:ui-monospace,Menlo,monospace}
+  .varrow .why{font-size:11px;color:var(--muted);font-weight:400;white-space:normal}
+  .varrow .state{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;
+                 padding:1px 6px;border-radius:999px;border:1px solid currentColor}
+  .varrow .state.set{color:var(--ok)} .varrow .state.unset{color:var(--err)}
+  .varrow input{margin-top:5px}
+  .alist:empty::after{content:"No assertions yet — a test needs at least one.";
+                      display:block;padding:10px 0;color:var(--muted);font-size:11.5px}
+  .stepedit{border:1px solid var(--line);border-radius:9px;padding:10px 12px;
+            margin-bottom:11px;background:var(--bg)}
+  .stepedit h5{margin:0 0 7px;font-size:12px;font-weight:650;display:flex;gap:8px;
+               align-items:center}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <span class="brand">mockd</span>
+  <span id="pill" class="pill off"><span class="dot"></span><span id="pilltext">stopped</span></span>
+  <code id="baseurl" style="font-size:12px;color:var(--muted)"></code>
+  <span class="grow"></span>
+  <button id="btnStart" class="primary">Start</button>
+  <button id="btnStop" class="danger" disabled>Stop</button>
+  <button id="btnRestart" disabled>Restart</button>
+</div>
+
+<nav class="side">
+  <div class="group">The contract</div>
+  <a data-view="overview" class="on">Overview <span class="n" id="navCov"></span></a>
+  <a data-view="connect">Connect</a>
+  <a data-view="authoring">Authoring <span class="n" id="navScore"></span></a>
+  <a data-view="source">Source <span class="n" id="navLock"></span></a>
+  <div class="group">Work</div>
+  <a data-view="explore">Explore <span class="n" id="navOps"></span></a>
+  <a data-view="tests">Tests <span class="n" id="navTests"></span></a>
+  <div class="group">Setup</div>
+  <a data-view="environments">Environments <span class="n" id="navEnvs"></span></a>
+  <a data-view="server">Server</a>
+</nav>
+
+<!-- Feedback belongs to the app, not to one view: every view fires banner(). -->
+<div id="toast" role="status" aria-live="polite" hidden>
+  <span id="toastText"></span>
+  <button id="toastClose" aria-label="Dismiss">&times;</button>
+</div>
+
+<main>
+
+  <!-- ===================================== OVERVIEW -->
+  <section class="view on" data-view="overview">
+    <header>
+      <h2>What the document actually says</h2>
+      <p>Every operation graded on the three things a spec can leave out: what comes back on
+         success, what the request body must contain, and what the failure paths are.</p>
+    </header>
+    <div class="card" id="cov">
+      <h3>Spec coverage <span class="grow"></span>
+        <span class="tag" id="covSpec"></span>
+        <button class="sm" id="btnCov">Refresh</button></h3>
+      <div class="body" id="covBody"><span class="hint">Reading the spec…</span></div>
+    </div>
+  </section>
+
+  <!-- ===================================== AUTHORING -->
+  <section class="view" data-view="authoring">
+    <header>
+      <h2>How to write the spec</h2>
+      <p>For whoever owns the API. Plain OpenAPI — no vendor extensions, nothing only this
+         toolchain understands. Each rule is graded against the document currently loaded,
+         with the failing operations named.</p>
+    </header>
+    <div class="card">
+      <h3>Compliance <span class="grow"></span>
+        <span class="tag" id="ruleSpec"></span>
+        <button class="sm" id="btnRules">Refresh</button></h3>
+      <div class="body" id="ruleBody"><span class="hint">Reading the spec…</span></div>
+    </div>
+    <div class="card">
+      <h3>The standard <span class="grow"></span>
+        <button class="sm" id="btnGuideCopy">Copy as Markdown</button></h3>
+      <div class="body"><p class="hint" style="margin-top:0">The full text lives in
+        <code>SPEC_GUIDE.md</code> — hand it to the backend team.</p>
+        <pre id="guideText" style="max-height:600px">Loading…</pre></div>
+    </div>
+  </section>
+
+  <!-- ===================================== SOURCE -->
+  <section class="view" data-view="source">
+    <header>
+      <h2>Where the spec comes from</h2>
+      <p>A green test run only means something if you know which document it was green
+         against. Every load is content-addressed and pinned in
+         <code>spec.lock.json</code>, which is committed — so swapping the spec is a
+         reviewable change, not a silent one.</p>
+    </header>
+
+    <div class="card">
+      <h3>The project spec <span class="grow"></span>
+        <span class="tag" id="projSpecTag"></span></h3>
+      <div class="body">
+        <p class="hint" style="margin-top:0">One document for the whole system — the mock,
+          the contract check, the tests, coverage and the Postman export all use this unless
+          a module is deliberately pinned to something else. Saved in
+          <code>clavis.json</code>, which is committed, so changing it is a reviewable
+          decision.</p>
+        <div class="row">
+          <div style="flex:1">
+            <label for="projSpec">Use this document everywhere</label>
+            <select id="projSpec"></select>
+          </div>
+          <div style="align-self:end">
+            <button class="primary" id="btnProjSave">Make it the project spec</button>
+          </div>
+        </div>
+        <div id="projModules"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Compare two documents <span class="grow"></span>
+        <span class="tag" id="cmpTag"></span></h3>
+      <div class="body">
+        <p class="hint" style="margin-top:0">Field by field, not line by line. A field added
+          to a <b>response</b> is harmless; the same field added to a <b>request</b> as
+          required breaks every existing caller — so each difference is sorted by who it
+          hurts.</p>
+        <div class="row">
+          <div style="flex:1"><label for="cmpFrom">From (the older one)</label>
+            <select id="cmpFrom"></select></div>
+          <div style="flex:1"><label for="cmpTo">To (the newer one)</label>
+            <select id="cmpTo"></select></div>
+          <div style="align-self:end">
+            <button class="primary" id="btnCompare">Compare</button></div>
+        </div>
+        <div id="cmpOut"></div>
+        <div class="btnrow" id="cmpExport" hidden>
+          <label for="cmpFormat" style="align-self:center;margin:0">Share as</label>
+          <select id="cmpFormat" style="width:auto">
+            <option value="markdown">Markdown — a pull request or ticket</option>
+            <option value="html">HTML — opens in a browser</option>
+            <option value="csv">CSV — a spreadsheet</option>
+          </select>
+          <label style="align-self:center;margin:0;font-weight:400">
+            <input type="checkbox" id="cmpBreakingOnly"> breaking only</label>
+          <button class="sm" id="btnCmpCopy">Copy</button>
+          <button class="sm" id="btnCmpDownload">Download</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Currently loaded <span class="grow"></span>
+        <button class="sm" id="btnSpecStatus">Refresh</button></h3>
+      <div class="body" id="specStatus"><span class="hint">Checking…</span></div>
+    </div>
+
+    <div class="cols">
+      <div>
+        <div class="card">
+          <h3>Fetch from a Swagger URL</h3>
+          <div class="body">
+            <label for="specUrl">OpenAPI / Swagger URL</label>
+            <input type="text" id="specUrl" placeholder="https://api.dev.example.com/openapi.json">
+            <label for="specUrlHeaders">Headers (optional)</label>
+            <textarea id="specUrlHeaders" rows="2"
+                      placeholder="Authorization: Bearer ..."></textarea>
+            <label for="specSaveAs">Save as</label>
+            <input type="text" id="specSaveAs" value="fetched.json">
+            <div class="btnrow">
+              <button class="primary" id="btnSpecFetch">Fetch</button>
+              <button class="sm" id="btnSpecUseUrl">Point the mock at the URL live</button>
+            </div>
+            <p class="hint">Fetching saves a candidate into <code>specs/</code> and compares
+              it to the lock. Pointing the mock at the URL directly means it re-checks
+              upstream on a poll, which is what a shared dev environment wants.</p>
+          </div>
+        </div>
+      </div>
+      <div>
+        <div class="card">
+          <h3>Upload a document</h3>
+          <div class="body">
+            <label for="specFile">Choose a .json / .yaml file</label>
+            <input type="file" id="specFile" accept=".json,.yaml,.yml"
+                   style="width:100%;padding:6px 0;font-size:12.5px">
+            <label for="specPaste">…or paste it</label>
+            <textarea id="specPaste" rows="7" spellcheck="false"
+                      placeholder='{"openapi": "3.1.0", "info": {...}, "paths": {...}}'></textarea>
+            <div class="btnrow">
+              <button class="primary" id="btnSpecUpload">Import as candidate</button>
+            </div>
+            <p class="hint">An upload never becomes the source of truth on its own. It is
+              parsed, saved into <code>specs/</code>, and shown against the lock — you
+              decide what happens next.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="candidateCard" hidden>
+      <h3>Candidate <span class="grow"></span><span class="tag" id="candName"></span></h3>
+      <div class="body" id="candBody"></div>
+    </div>
+
+    <div class="card">
+      <h3>Keeping it honest</h3>
+      <div class="body">
+        <p class="hint" style="margin-top:0">You cannot stop someone opening an old export
+          on their own machine — and you should not try, because comparing old against new
+          is a legitimate way to prove a regression. What this does is make it impossible
+          to do <b>silently</b>, and impossible to land in CI.</p>
+        <div class="facts">
+          <div class="fact"><b>1. Content address</b>Nothing is “the spec”. It is always the
+            spec with digest <code>abc123…</code>, normalised so re-exports with different
+            key order are not false alarms.</div>
+          <div class="fact"><b>2. A committed lock</b><code>spec.lock.json</code> records the
+            digest, source, time and operation count. Changing spec changes the lockfile,
+            which shows up as a diff in review — the trick <code>package-lock.json</code> uses.</div>
+          <div class="fact"><b>3. CI re-fetches and compares</b>
+            <code>speclock.py check</code> pulls from the recorded source and exits non-zero
+            if the digest moved. Upstream changing is fine; it just has to be re-locked
+            on purpose.</div>
+          <div class="fact"><b>4. Every result is stamped</b>Test and verify reports carry the
+            digest they ran against, so “these passed” is always “these passed against
+            document X”.</div>
+          <div class="fact"><b>5. Fewer operations is loud</b>An older export is mostly
+            removals. The check says so in those words rather than leaving you to notice.</div>
+          <div class="fact"><b>6. Comparing is supported</b>Run the suites against two
+            documents on purpose with <code>speclock.py diff</code> — so nobody needs to
+            smuggle an old spec in to prove a point.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================================== CONNECT -->
+  <section class="view" data-view="connect">
+    <header>
+      <h2>Point your app here</h2>
+      <p>One base URL, open CORS, and the same rejection shape the real backend sends — so
+         error handling written against the mock still works in production.</p>
+    </header>
+    <div class="card" id="integ" hidden>
+      <h3>Connection <span class="grow"></span><span class="tag" id="integMode"></span></h3>
+      <div class="body" id="integBody"></div>
+    </div>
+    <div class="card" id="integOff">
+      <div class="empty">Start the mock to see its address and snippets.</div>
+    </div>
+  </section>
+
+  <!-- ===================================== EXPLORE -->
+  <section class="view" data-view="explore">
+    <header>
+      <h2>Explore the API</h2>
+      <p>Pick an operation and send it — at the mock, or at any environment you have
+         defined. The <code>X-Mock-*</code> headers only mean anything at the mock.</p>
+    </header>
+    <div class="cols">
+      <div class="sticky">
+        <div class="card" style="margin-bottom:0">
+          <h3>Operations <span class="grow"></span><span class="tag" id="opcount">0</span></h3>
+          <div class="body" style="padding-bottom:12px">
+            <input type="text" id="filter" placeholder="filter by path, method or tag">
+            <div id="collHint"></div>
+          </div>
+          <div class="ops" id="ops">
+            <div class="empty">Start the mock to load its routes.</div>
+          </div>
+          <div class="body" style="border-top:1px solid var(--line)">
+            <div class="btnrow" style="margin:0">
+              <button class="sm" id="btnCollection">Download Postman collection</button>
+              <button class="sm" id="btnCollectionCopy">Copy JSON</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div class="card">
+          <h3>Request <span class="grow"></span>
+            <span class="tag" id="targetTag"></span></h3>
+          <div class="body">
+            <label for="exploreTarget">Send to</label>
+            <select id="exploreTarget"></select>
+            <p class="hint" style="margin-top:5px" id="targetHint"></p>
+            <div class="row">
+              <div style="flex:0 0 112px">
+                <label for="method">Method</label>
+                <select id="method">
+                  <option>GET</option><option>POST</option><option>PUT</option>
+                  <option>PATCH</option><option>DELETE</option>
+                </select>
+              </div>
+              <div style="flex:1">
+                <label for="path">Path</label>
+                <input type="text" id="path" placeholder="/api/v1/user/list">
+              </div>
+            </div>
+            <label for="query">Query string</label>
+            <input type="text" id="query" placeholder="page=1&amp;page_size=10">
+            <label for="headers">Headers</label>
+            <textarea id="headers" rows="2" placeholder="Authorization: Bearer test"></textarea>
+            <div class="quick">
+              <button class="sm" data-h="X-Mock-Status: 404">force 404</button>
+              <button class="sm" data-h="X-Mock-Status: 500">force 500</button>
+              <button class="sm" data-h="X-Mock-Scenario: empty">empty list</button>
+              <button class="sm" data-h="X-Mock-Scenario: page_full">full page</button>
+              <button class="sm" data-h="X-Mock-Nulls: on">all nulls</button>
+              <button class="sm" data-h="X-Mock-Delay: 1500">slow 1.5s</button>
+              <button class="sm" id="clearHeaders">clear</button>
+            </div>
+            <label for="body">Body <span id="bodyNote" class="hint"
+                  style="display:inline;margin:0"></span></label>
+            <textarea id="body" rows="7" placeholder="{ }"></textarea>
+            <div class="btnrow">
+              <button class="primary" id="btnSend" disabled>Send</button>
+              <button class="sm" id="btnCurl">Copy as cURL</button>
+              <button class="sm" id="btnCurlReal" hidden>Copy with my credential</button>
+              <button class="sm" id="btnSample">Fill sample body</button>
+              <button class="sm" id="btnBreak">Break the body</button>
+              <button class="sm" id="btnSaveTest">Save as test…</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Response <span class="grow"></span><span id="respMeta" class="tag"></span></h3>
+          <div id="respHead" class="banner" hidden></div>
+          <pre id="resp">No request sent yet.</pre>
+        </div>
+
+        <div class="card">
+          <h3>Recent requests <span class="grow"></span>
+            <button class="sm" id="btnReqs">Refresh</button></h3>
+          <div id="reqlog"><div class="empty">Nothing yet.</div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================================== TESTS -->
+  <section class="view" data-view="tests">
+    <header>
+      <h2>Saved tests</h2>
+      <p>One file per module — the sections come from the spec's own tags. Labels like
+         <code>smoke</code> or <code>negative</code> cut across them, for choosing what to
+         run. No URL or token lives in a test; everything that changes between servers is a
+         variable.</p>
+    </header>
+    <div class="cols">
+      <div class="sticky">
+        <div class="card">
+          <h3>Run</h3>
+          <div class="body">
+            <label for="testEnv">Against</label>
+            <select id="testEnv"></select>
+            <label for="testKind">Which</label>
+            <select id="testKind">
+              <option value="">everything</option>
+              <option value="case">single-API cases</option>
+              <option value="api">scenarios that need pre-data</option>
+              <option value="e2e">end-to-end sanity flows</option>
+            </select>
+            <div class="check" style="margin-top:11px">
+              <input type="checkbox" id="testDrafts" checked>
+              <label for="testDrafts">Include my drafts — <code>tests/drafts/</code>,
+                gitignored; CI runs the shared ones only</label>
+            </div>
+            <div class="btnrow">
+              <button class="primary" id="btnRunTests">Run tests</button>
+              <button class="sm" id="btnRunSanity">Sanity only</button>
+              <button class="sm danger" id="btnCancelTests" hidden>Cancel</button>
+            </div>
+            <p class="hint" id="testElapsed" style="margin:0"></p>
+            <div class="btnrow">
+              <button class="sm" id="btnImport">Import / paste…</button>
+              <button class="sm" id="btnCI">CI snippet</button>
+              <button class="sm" id="btnTestsRefresh">Refresh</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div class="card">
+          <h3>Sections <span class="grow"></span><span class="tag" id="testCount"></span></h3>
+          <div class="body" style="padding-bottom:0"><div class="quick" id="tagFilter"
+               style="margin-top:0"></div></div>
+          <div class="body" id="testTree">
+            <div class="empty">No suites yet — send a request and use “Save as test…”.</div>
+          </div>
+        </div>
+        <div class="card" id="testOutCard" hidden>
+          <h3>Result <span class="grow"></span>
+            <span class="tag" id="testProgress"></span>
+            <button class="sm" id="testRaw">Raw log</button></h3>
+          <div id="testOutHead" class="banner" hidden></div>
+          <div id="testRows" class="runrows"></div>
+          <pre id="testOut" hidden></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================================== ENVIRONMENTS -->
+  <section class="view" data-view="environments">
+    <header>
+      <h2>Environments</h2>
+      <p>Base URL, how to authenticate, and the test data that belongs to that server —
+         named once in <code>environments.json</code> and used by every tool. Credentials
+         never live in it.</p>
+    </header>
+    <div class="card">
+      <h3>Defined environments</h3>
+      <div class="body" id="envList"><span class="hint">Loading…</span></div>
+    </div>
+    <div class="card">
+      <h3>Check a real environment</h3>
+      <div class="body">
+        <p class="hint" style="margin-top:0">A different question from the mock self-check:
+          does the <b>deployed backend</b> match the same spec? Read-only unless you say
+          otherwise — against a real environment, writes create and delete real rows.</p>
+        <div class="row">
+          <div style="flex:2">
+            <label for="liveEnv">Environment</label>
+            <select id="liveEnv"><option value="">— pick one —</option></select>
+          </div>
+          <div style="flex:0 0 auto;display:flex;align-items:flex-end">
+            <button class="sm" id="btnEnvLogin">Test login</button>
+          </div>
+        </div>
+        <p class="hint" id="envHint"></p>
+        <div class="row">
+          <div style="flex:2">
+            <label for="liveUrl">Base URL — overrides the environment</label>
+            <input type="text" id="liveUrl" placeholder="https://api.dev.example.com">
+          </div>
+          <div style="flex:1">
+            <label for="liveOnly">Only (regex, optional)</label>
+            <input type="text" id="liveOnly" placeholder="GET /api/v1/user">
+          </div>
+        </div>
+        <label for="liveAuthMode">How this API authenticates</label>
+        <select id="liveAuthMode">
+          <option value="env">use the environment's own login</option>
+          <option value="cookie">a cookie — what this API actually reads</option>
+          <option value="bearer">an Authorization: Bearer token</option>
+        </select>
+        <div id="liveCookieWrap" hidden>
+          <label for="liveCookie">Cookie</label>
+          <input type="text" id="liveCookie" placeholder="access_token=eyJhbGciOi…">
+          <p class="hint">Copy it from your browser's devtools → Application → Cookies after
+            logging in, or let an environment with <code>auth.mode: "login"</code> fetch it.</p>
+        </div>
+        <div id="liveBearerWrap" hidden>
+          <label for="liveToken">Bearer token</label>
+          <input type="text" id="liveToken" placeholder="eyJhbGciOi… (Bearer is added for you)">
+          <p class="hint" style="color:var(--warn)">If the server answers “Authorization token
+            missing” even with this set, it is not reading the header — use a cookie.</p>
+        </div>
+        <label for="liveHeaders">Extra headers</label>
+        <textarea id="liveHeaders" rows="2"
+                  placeholder="X-Tenant: acme&#10;Cookie: session=..."></textarea>
+        <label style="margin-top:12px">Operations
+          <span class="hint" style="display:inline;margin:0">— untick anything you do not
+            want called</span></label>
+        <div class="btnrow" style="margin-top:4px">
+          <button class="sm" id="opsAll">select all</button>
+          <button class="sm" id="opsNone">none</button>
+          <button class="sm" id="opsReads">reads only</button>
+          <span class="tag" id="opsCount" style="align-self:center"></span>
+        </div>
+        <input type="text" id="opsFilter" placeholder="filter" style="margin-top:7px">
+        <div id="opsPick" class="opspick"></div>
+        <div class="check"><input type="checkbox" id="liveSkipStream" checked>
+          <label for="liveSkipStream">Skip streaming endpoints entirely
+            <span class="hint" style="display:inline;margin:0">— otherwise they are sampled
+              for 2s and closed</span></label></div>
+        <div class="check"><input type="checkbox" id="liveNegative">
+          <label for="liveNegative">Probe documented failure paths (strip auth, drop a
+            required field)</label></div>
+        <div class="check"><input type="checkbox" id="liveWrites">
+          <label for="liveWrites" style="color:var(--err)">Include POST/PUT/PATCH/DELETE —
+            this writes real data</label></div>
+        <div class="check"><input type="checkbox" id="liveLearn">
+          <label for="liveLearn">Capture the responses into
+            <code>learned_overlay.json</code></label></div>
+        <div class="btnrow">
+          <button id="btnVerifyLive">Run against this environment</button>
+          <button class="sm danger" id="btnCancelLive" hidden>Cancel</button>
+          <span class="hint" id="liveElapsed" style="margin:0;align-self:center"></span>
+        </div>
+      </div>
+    </div>
+    <div class="card" id="liveOutCard" hidden>
+      <h3>Result <span class="grow"></span>
+        <span class="tag" id="liveProgress"></span>
+        <button class="sm" id="liveRaw">Raw log</button></h3>
+      <div id="liveOutHead" class="banner" hidden></div>
+      <div id="liveRows" class="runrows"></div>
+      <pre id="liveOut" hidden></pre>
+    </div>
+  </section>
+
+  <!-- ===================================== SERVER -->
+  <section class="view" data-view="server">
+    <header>
+      <h2>Server</h2>
+      <p>The console starts <code>mockd.py</code> as a child process and stops it when the
+         console exits.</p>
+    </header>
+    <div class="cols">
+      <div>
+        <div class="card">
+          <h3>Configuration</h3>
+          <div class="body">
+            <label for="specPick">Spec</label>
+            <select id="specPick"></select>
+            <label for="spec" id="specPathLabel">File or https:// URL</label>
+            <input type="text" id="spec" list="specs" value="sample_spec.yaml">
+            <datalist id="specs"></datalist>
+            <p class="hint" id="specDefaultHint"></p>
+            <label for="overlay">Overlay (optional)</label>
+            <input type="text" id="overlay" list="overlays" value="">
+            <datalist id="overlays"></datalist>
+            <div class="row">
+              <div><label for="port">Port</label>
+                   <input type="number" id="port" value="4010"></div>
+              <div><label for="arrayItems">Array items</label>
+                   <input type="number" id="arrayItems" value="2" min="1" max="50"></div>
+            </div>
+            <label for="validationMode">Bad requests answer with</label>
+            <select id="validationMode">
+              <option value="spec">422 + detail[] — what the real API returns</option>
+              <option value="debug">400 + every violating field named</option>
+            </select>
+            <div class="check" style="margin-top:11px"><input type="checkbox" id="stateful">
+              <label for="stateful">Stateful CRUD</label></div>
+            <div class="check"><input type="checkbox" id="requireAuth">
+              <label for="requireAuth">Require Authorization</label></div>
+            <div class="check"><input type="checkbox" id="allowUndoc" checked>
+              <label for="allowUndoc">Allow undocumented status</label></div>
+            <div id="urlOpts" hidden>
+              <label for="pollSecs">Poll upstream every (s)</label>
+              <input type="number" id="pollSecs" value="60">
+              <label for="specHeaders">Headers for fetching the spec</label>
+              <textarea id="specHeaders" rows="2"
+                        placeholder="Authorization: Bearer ..."></textarea>
+            </div>
+            <div class="btnrow">
+              <button class="sm" id="btnReload">Reload spec</button>
+              <button class="sm" id="btnReset">Reset state</button>
+              <button class="sm" id="btnOverlay">Build overlay</button>
+              <button class="sm" id="btnVerify">Self-check</button>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Coverage &amp; drift</h3>
+          <div class="body" id="drift"><span class="hint">Start the server to see where each
+            response body comes from.</span></div>
+        </div>
+      </div>
+      <div>
+        <div class="card">
+          <h3>Server output <span class="grow"></span>
+            <button class="sm" id="btnStdout">Refresh</button></h3>
+          <pre id="stdout" style="max-height:600px">not started</pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- ===================================== dialogs -->
+<dialog id="envDlg">
+  <h3>Configure <span id="envDlgName"></span></h3>
+  <div class="body" style="padding:14px 16px">
+    <p class="hint" id="envDlgAbout" style="margin-top:0"></p>
+    <div id="envDlgFields"></div>
+    <p class="hint">Written to <code id="envDlgWhere">.env</code> — gitignored, and read
+      when a value is needed, so nothing restarts. The committed
+      <code>environments.json</code> keeps only the <code>${VAR}</code> placeholders, so a
+      password typed here cannot reach a pull request.</p>
+    <div id="envDlgMsg"></div>
+  </div>
+  <div class="btnrow" style="padding:11px 16px;border-top:1px solid var(--line);margin:0">
+    <button class="primary" id="envDlgSave">Save</button>
+    <button class="sm" id="envDlgTest">Save &amp; test login</button>
+    <button class="sm" id="envDlgCancel">Cancel</button>
+  </div>
+</dialog>
+
+<dialog id="importDlg">
+  <h3>Import tests</h3>
+  <div class="body" style="padding:14px 16px">
+    <p class="hint" style="margin-top:0">Paste one test, an array of them, or a whole suite.
+      Everything is validated before anything is written, and it lands in the <b>draft</b>
+      workspace — it still has to pass before it can be promoted. This is the same door a
+      generator or an assistant writes through.</p>
+    <div class="row">
+      <div style="flex:1">
+        <label for="impSuite">Into suite</label>
+        <input type="text" id="impSuite" list="suiteList" value="imported">
+      </div>
+      <div style="flex:1">
+        <label for="impOperation">Brief an assistant about</label>
+        <select id="impOperation"><option value="">— pick an operation —</option></select>
+      </div>
+    </div>
+    <div class="btnrow">
+      <button class="sm" id="btnCopyPrompt">Copy the brief</button>
+      <span class="hint" style="margin:0;align-self:center">grammar + this operation's
+        contract + a real response + what is already covered</span>
+    </div>
+    <label for="impBody">Tests JSON</label>
+    <textarea id="impBody" rows="15" spellcheck="false"
+      placeholder='[{"id":"...","name":"...","request":{"method":"GET","path":"/api/v1/..."},"assertions":[{"type":"status","equals":200}]}]'></textarea>
+    <div id="impErrors"></div>
+  </div>
+  <div class="btnrow" style="padding:11px 16px;border-top:1px solid var(--line);margin:0">
+    <button class="primary" id="impSave">Validate &amp; import</button>
+    <button class="sm" id="impCancel">Cancel</button>
+  </div>
+</dialog>
+
+<dialog id="editDlg">
+  <h3>Edit test — <span id="editTitle"></span></h3>
+  <div class="body" style="padding:14px 16px">
+    <p class="hint" id="editHint" style="margin-top:0"></p>
+    <div id="editBuilt"></div>
+    <div id="editRawWrap" hidden>
+      <textarea id="editBody" rows="20" spellcheck="false"></textarea>
+    </div>
+  </div>
+  <div id="editTry" class="tryout" hidden></div>
+  <div class="btnrow" style="padding:11px 16px;border-top:1px solid var(--line);margin:0">
+    <button class="primary" id="editSave">Save changes</button>
+    <button class="sm" id="editRun">Run now</button>
+    <button class="sm" id="btnEditRaw">Raw JSON</button>
+    <button class="sm" id="editCancel">Cancel</button>
+  </div>
+</dialog>
+
+<dialog id="saveDlg">
+  <h3>Save this request as a test</h3>
+  <div class="body" style="padding:14px 16px">
+    <div class="row">
+      <div style="flex:1">
+        <label for="dlgSuite">Section — one file per module</label>
+        <input type="text" id="dlgSuite" list="suiteList">
+        <datalist id="suiteList"></datalist>
+      </div>
+      <div style="flex:1">
+        <label for="dlgId">Test id</label>
+        <input type="text" id="dlgId">
+      </div>
+    </div>
+    <p class="hint" style="margin-top:5px" id="dlgWhere"></p>
+    <label for="dlgName">Name</label>
+    <input type="text" id="dlgName">
+    <label>Labels — cut across sections, for choosing what to run</label>
+    <div class="quick" id="dlgTags"></div>
+    <input type="text" id="dlgTagsExtra" placeholder="other labels, comma separated"
+           style="margin-top:7px">
+    <div class="row">
+      <div style="flex:1">
+        <label for="dlgTarget">Save as</label>
+        <select id="dlgTarget">
+          <option value="case">a single-API case</option>
+          <option value="api">a step in a scenario that needs pre-data</option>
+          <option value="e2e">a step in an end-to-end sanity flow</option>
+        </select>
+      </div>
+      <div style="flex:1" id="dlgScenarioWrap" hidden>
+        <label for="dlgScenario">Scenario id</label>
+        <input type="text" id="dlgScenario" placeholder="create-and-approve">
+      </div>
+    </div>
+    <div id="dlgRoleWrap" hidden>
+      <label for="dlgRole">This step is</label>
+      <select id="dlgRole">
+        <option value="setup">pre-data (setup)</option>
+        <option value="target">the endpoint under test (target)</option>
+      </select>
+    </div>
+    <label>Assertions — seeded from the response you just got, and yours to change</label>
+    <div id="dlgAsserts"></div>
+    <label>Capture for later steps</label>
+    <div id="dlgCaptures"></div>
+    <p class="hint">Captured values become <code>{{name}}</code> in any later step of the
+      same scenario — that is how an endpoint needing existing data gets tested.</p>
+  </div>
+  <div id="dlgTry" class="tryout" hidden></div>
+  <div class="btnrow" style="padding:11px 16px;border-top:1px solid var(--line);margin:0">
+    <button class="primary" id="dlgSave">Save</button>
+    <button class="sm" id="dlgRun">Run now</button>
+    <button class="sm" id="dlgCancel">Cancel</button>
+    <span class="grow"></span>
+    <span class="hint" id="dlgHint" style="margin:0"></span>
+  </div>
+</dialog>
+
+<script src="/console.js"></script>
+</body>
+</html>

@@ -1,0 +1,94 @@
+{
+  "_meta": {
+    "note": "Named targets for verify.py, postman.py and the console: python verify.py --env dev. SECRETS DO NOT BELONG HERE. Any value may be written as ${VAR} and is resolved from the shell, from .env, or from environments.local.json \u2014 both of which are gitignored. This file holds the shape of an environment and is safe to commit.",
+    "auth_modes": {
+      "none": "send nothing (the mock, unless started with --require-auth)",
+      "token": "a token you already have: {mode, token, header?, prefix?}",
+      "login": "call a login endpoint: {mode, path, method?, send: query|json|form, username_field?, password_field?, username, password, token_path?, use_cookies?}"
+    },
+    "setup": "cp environments.local.example.json environments.local.json and put real credentials there, or export the variables in your shell / CI secret store.",
+    "data": "Per-environment test data. A suite's `data` says what a value MEANS; an environment's `data` says what it IS on that server \u2014 the id of a row that exists on staging is not the id of one on dev. Merged over the suite's own data at run time, and --var beats both. ${VAR} works here too, so an id that is sensitive stays out of git."
+  },
+  "environments": {
+    "mock": {
+      "description": "The local mock. Nothing to authenticate against unless it was started with --require-auth.",
+      "base_url": "http://localhost:4010",
+      "auth": {
+        "mode": "none"
+      },
+      "data": {
+        "departmentTitle": "QA Automation {{$randomInt}}",
+        "knownDepartmentId": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+      }
+    },
+    "mock-auth": {
+      "description": "The local mock started with --require-auth, for exercising 401 handling.",
+      "base_url": "http://localhost:4010",
+      "auth": {
+        "mode": "token",
+        "token": "any-value-works-the-mock-only-checks-presence"
+      }
+    },
+    "dev": {
+      "description": "Shared dev backend. This API reads a COOKIE \u2014 an Authorization: Bearer header is ignored and the server still says the token is missing. /api/v1/auth/dev-login takes username and password as QUERY params and replies with Set-Cookie, so the cookie jar is what gets reused.",
+      "base_url": "${DEV_BASE_URL}",
+      "auth": {
+        "mode": "login",
+        "path": "/api/v1/auth/dev-login",
+        "method": "POST",
+        "send": "query",
+        "username_field": "username",
+        "password_field": "password",
+        "username": "${DEV_USERNAME}",
+        "password": "${DEV_PASSWORD}",
+        "use_cookies": true
+      },
+      "data": {
+        "departmentTitle": "QA Automation {{$randomInt}}",
+        "knownDepartmentId": "${DEV_DEPARTMENT_ID}",
+        "knownUserId": "${DEV_USER_ID}"
+      }
+    },
+    "staging": {
+      "description": "Staging, using a token issued out of band (CI secret, password manager).",
+      "base_url": "${STAGING_BASE_URL}",
+      "auth": {
+        "mode": "token",
+        "token": "${STAGING_TOKEN}",
+        "header": "Authorization",
+        "prefix": "Bearer "
+      },
+      "data": {
+        "departmentTitle": "QA Automation {{$randomInt}}",
+        "knownDepartmentId": "${STAGING_DEPARTMENT_ID}"
+      }
+    },
+    "mock-login": {
+      "description": "The local mock, driven through the real login flow \u2014 proves an environment's login config before you point it at dev.",
+      "base_url": "http://localhost:4010",
+      "auth": {
+        "mode": "login",
+        "path": "/api/v1/auth/dev-login",
+        "method": "POST",
+        "send": "query",
+        "username": "qa.bot@example.com",
+        "password": "anything-the-mock-does-not-check",
+        "token_path": "data.access_token",
+        "use_cookies": true
+      }
+    },
+    "dev-cookie": {
+      "description": "Dev, using a cookie copied from the browser \u2014 for when you have a session but not the password. devtools -> Application -> Cookies.",
+      "base_url": "${DEV_BASE_URL}",
+      "auth": {
+        "mode": "none"
+      },
+      "headers": {
+        "Cookie": "${DEV_COOKIE}"
+      },
+      "data": {
+        "knownDepartmentId": "${DEV_DEPARTMENT_ID}"
+      }
+    }
+  }
+}
