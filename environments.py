@@ -287,11 +287,50 @@ def _cookies_from(headers_obj, raw_headers):
     return "; ".join(jar)
 
 
+# A credential is pasted by a human, usually from a browser's devtools or a
+# terminal, and paste brings friends: a trailing newline, surrounding quotes,
+# the Set-Cookie attributes that belong on the response and not on the request.
+# Sent verbatim, each of those changes the value the server compares — and the
+# server then says "Invalid token", which reads as a bad credential rather than
+# a bad paste. Normalising is not tidiness; it is the difference between an
+# hour lost and none.
+COOKIE_ATTRIBUTES = {"path", "domain", "expires", "max-age", "secure", "httponly",
+                     "samesite", "priority", "partitioned"}
+
+
+def clean_header_value(name, value):
+    """What the user meant, out of what the user pasted."""
+    text = str(value or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1].strip()
+    if name.lower() != "cookie":
+        return text
+
+    kept = []
+    for part in text.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        label = part.split("=", 1)[0].strip().lower()
+        if label in COOKIE_ATTRIBUTES:
+            continue                       # response metadata, not a cookie
+        if "=" in part:
+            key, val = part.split("=", 1)
+            kept.append(f"{key.strip()}={val.strip()}")
+        else:
+            kept.append(part)
+    return "; ".join(kept)
+
+
+def clean_headers(headers):
+    return {k: clean_header_value(k, v) for k, v in (headers or {}).items()}
+
+
 def authenticate(env, verbose=False):
     """Return (headers, note). Performs a login when the environment asks for one."""
     auth = resolve(env.get("auth") or {"mode": "none"})
     mode = auth.get("mode", "none")
-    headers = resolve(env.get("headers") or {})
+    headers = clean_headers(resolve(env.get("headers") or {}))
 
     if mode == "none":
         return headers, "no authentication"
@@ -303,6 +342,7 @@ def authenticate(env, verbose=False):
                              "set the ${VAR} it refers to")
         name = auth.get("header", "Authorization")
         prefix = auth.get("prefix", "Bearer ")
+        token = clean_header_value(name, token)
         headers[name] = f"{prefix}{token}" if prefix and not token.startswith(prefix) else token
         return headers, f"static token in {name}"
 

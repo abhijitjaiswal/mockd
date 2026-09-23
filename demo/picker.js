@@ -20,7 +20,14 @@ const ck=(n,ok,d)=>{ok?pass++:fail++;console.log(`  ${ok?"ok  ":"FAIL"}  ${n}${o
   ck("none clears them", (await p.locator("#opsCount").textContent()).startsWith("0 of"));
   await p.locator("#opsReads").click(); await p.waitForTimeout(300);
   const readsTxt = await p.locator("#opsCount").textContent();
-  ck("reads only selects GETs", /^49 of/.test(readsTxt), readsTxt);
+  // how many GETs there are depends on which spec is loaded, so count them
+  // rather than writing one spec's number into the assertion
+  const gets = await p.evaluate(async () => {
+    const d = await (await fetch("/api/routes")).json();
+    return (d.routes || d).filter((r) => r.method === "GET").length;
+  });
+  ck("reads only selects GETs", new RegExp(`^${gets} of`).test(readsTxt),
+     `${readsTxt} (spec has ${gets} GETs)`);
 
   await p.locator("#opsFilter").fill("metadata"); await p.waitForTimeout(400);
   const filtered = await p.locator("#opsPick label").count();

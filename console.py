@@ -610,6 +610,52 @@ def curl_auth():
     return jsonify({"prelude": prelude, "extra": extra, "target": label})
 
 
+def sample_path_and_query(route):
+    """A path with its {params} filled by TYPE, and every required query
+    parameter present.
+
+    The explorer used to substitute one hardcoded uuid into every path
+    parameter and send no query string at all, so an integer id got a uuid and
+    a required filter simply went missing — the request was invalid before it
+    left the browser, and the API's complaint looked like the API's fault."""
+    import random
+
+    import postman as pm
+    rng = random.Random(route["key"])
+    path = route["path"]
+    query = []
+    for prm in route.get("parameters") or []:
+        schema = prm.get("schema") or {}
+        if prm.get("in") == "path":
+            path = path.replace("{%s}" % prm["name"], pm.sample_value(schema, rng))
+        elif prm.get("in") == "query" and prm.get("required"):
+            query.append(f"{prm['name']}={pm.sample_value(schema, rng, '')}")
+    return path, "&".join(query)
+
+
+@app.get("/api/sample-request")
+def sample_request():
+    """What a valid call to this operation looks like, before you edit it."""
+    method = (request.args.get("method") or "GET").upper()
+    wanted = request.args.get("path") or "/"
+    spec_path = project.active_spec(mock.options.get("spec"))
+    try:
+        from mockd import Source, Spec
+        src = Source(spec_path, poll=0, cache_dir=str(LOG_DIR))
+        text, _ = src.read(force=True)
+        spec = Spec(text=text, origin=spec_path)
+    except Exception as exc:
+        return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+    route = next((r for r in spec.routes
+                  if r["method"] == method and r["path"] == wanted), None)
+    if route is None:
+        return jsonify({"error": f"{method} {wanted} is not in the spec"}), 404
+    path, query = sample_path_and_query(route)
+    required = [prm["name"] for prm in (route.get("parameters") or [])
+                if prm.get("in") == "query" and prm.get("required")]
+    return jsonify({"path": path, "query": query, "required_query": required})
+
+
 @app.get("/api/curl")
 def curl():
     """A ready-to-paste curl for one operation, with a valid body filled in."""
@@ -635,16 +681,8 @@ def curl():
         if route is None:
             return jsonify({"error": f"{method} {path} is not in the spec"}), 404
         rng = random.Random(route["key"])
-        url = base + path
-        query = []
-        for prm in route["parameters"]:
-            schema = prm.get("schema") or {}
-            if prm.get("in") == "path":
-                url = url.replace("{%s}" % prm["name"], pm.sample_value(schema, rng))
-            elif prm.get("in") == "query" and prm.get("required"):
-                query.append(f"{prm['name']}={pm.sample_value(schema, rng, '')}")
-        if query:
-            url += "?" + "&".join(query)
+        sampled, query = sample_path_and_query(route)
+        url = base + sampled + ("?" + query if query else "")
         media = (route["request_body"].get("content") or {}).get("application/json")
         if media and media.get("schema"):
             body = generate_from_schema(media["schema"], rng, array_items=1)

@@ -8,15 +8,37 @@
  */
 const { chromium } = require("playwright");
 
-// A real host is needed to prove a fetch failure reaches the screen. Point it
-// at your own with MOCKD_SPEC_HOST; the default is a public sample API.
-const HOST = process.env.MOCKD_SPEC_HOST || "https://petstore3.swagger.io";
+const http = require("http");
+
+// A reachable host is needed to prove a fetch result reaches the screen. It
+// used to be a public sample API, which made this suite fail whenever that
+// service was slow — a test that depends on someone else's uptime reports
+// their outage as your bug. Serve it here instead.
+const FIXTURE_SPEC = JSON.stringify({
+  openapi: "3.1.0",
+  info: { title: "Toast fixture", version: "1.0.0" },
+  paths: { "/ping": { get: { responses: { 200: { description: "ok" } } } } },
+});
 
 let pass = 0, fail = 0; const errs = [];
 const check = (n, ok, d) => { ok ? pass++ : fail++;
   console.log(`  ${ok ? "ok  " : "FAIL"}  ${n}${ok || !d ? "" : "  — " + d}`); };
 
 (async () => {
+  const fixture = await new Promise((resolve) => {
+    const srv = http.createServer((req, res) => {
+      if (req.url.split("?")[0] === "/openapi.json") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        return res.end(FIXTURE_SPEC);
+      }
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end('{"detail":"nope"}');
+    });
+    srv.listen(0, "127.0.0.1", () =>
+      resolve({ srv, base: `http://127.0.0.1:${srv.address().port}` }));
+  });
+  const HOST = fixture.base;
+
   const b = await chromium.launch();
   const p = await b.newPage();
   p.on("pageerror", (e) => errs.push("pageerror: " + e.message));
@@ -45,7 +67,7 @@ const check = (n, ok, d) => { ok ? pass++ : fail++;
   await p.locator('nav.side a[data-view="source"]').click();
   await p.waitForTimeout(600);
 
-  await p.locator("#specUrl").fill(HOST.replace(/^https?:\/\//, "") + "/api/v3/openapi.json");
+  await p.locator("#specUrl").fill(HOST.replace(/^https?:\/\//, "") + "/openapi.json");
   await p.locator("#btnSpecFetch").click(); await p.waitForTimeout(900);
   check("a URL with no scheme says so, on screen",
         /scheme/i.test(await p.locator("#toast").textContent()),
@@ -62,7 +84,7 @@ const check = (n, ok, d) => { ok ? pass++ : fail++;
         !(await p.locator("#btnSpecFetch").isDisabled()));
 
   // a real fetch: the candidate card appears AND the message is readable
-  await p.locator("#specUrl").fill(HOST + "/api/v3/openapi.json");
+  await p.locator("#specUrl").fill(HOST + "/openapi.json");
   await p.locator("#specSaveAs").fill("toast-probe.json");
   await p.locator("#btnSpecFetch").click(); await p.waitForTimeout(9000);
   check("a good fetch reports operations",
@@ -79,6 +101,6 @@ const check = (n, ok, d) => { ok ? pass++ : fail++;
 
   console.log(`\n${pass} passed, ${fail} failed`);
   console.log(errs.length ? "JS ERRORS:\n  " + errs.join("\n  ") : "no JS errors");
-  await b.close();
+  await b.close(); fixture.srv.close();
   process.exit(fail || errs.length ? 1 : 0);
 })();

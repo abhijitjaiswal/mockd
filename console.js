@@ -220,10 +220,13 @@ function selectOp(route, el) {
   [...document.querySelectorAll(".op")].forEach((n) => n.classList.remove("sel"));
   if (el) el.classList.add("sel");
   $("method").value = route.method;
-  // fill {param} placeholders with a value the stateful store / examples use
+  // A first guess that is valid on its own: the spec knows each parameter's
+  // type and which query parameters are required, so ask rather than paste one
+  // uuid into everything and send no query string.
   $("path").value = route.path.replace(/\{[^}]+\}/g, "3fa85f64-5717-4562-b3fc-2c963f66afa6");
   $("query").value = "";
   $("body").value = "";
+  fillSampleRequest(route);
   const note = [];
   if (route.state) note.push(MARK[route.state] + " " + MARK_LABEL[route.state][0]);
   if (route.detail && route.detail.fields_documented)
@@ -232,6 +235,26 @@ function selectOp(route, el) {
   if (route.scenarios?.length) note.push("scenarios: " + route.scenarios.join(", "));
   $("bodyNote").textContent = note.length ? "— " + note.join("  ·  ") : "";
   if (["POST", "PUT", "PATCH"].includes(route.method)) fillSample();
+}
+
+/* Path parameters typed correctly and required query parameters present — the
+   difference between a request that can succeed and one that cannot. */
+async function fillSampleRequest(route) {
+  const q = new URLSearchParams({ method: route.method, path: route.path });
+  try {
+    const { data } = await api("/api/sample-request?" + q);
+    if (!data || data.error) return;
+    if (SELECTED !== route) return;          // a later click already won
+    if (data.path) $("path").value = data.path;
+    $("query").value = data.query || "";
+    if ((data.required_query || []).length) {
+      $("bodyNote").textContent +=
+        `${$("bodyNote").textContent ? "  ·  " : "— "}required query: `
+        + data.required_query.join(", ");
+    }
+  } catch {
+    /* the placeholder path already filled in stays */
+  }
 }
 
 /* ---------------------------------------------------------------- tester */
