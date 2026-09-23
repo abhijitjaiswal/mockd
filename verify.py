@@ -468,6 +468,35 @@ def login_routes(spec):
     return found
 
 
+# A server that reads a cookie called one thing, handed a cookie called another,
+# answers exactly as if nothing was sent. So "no credential" and "the right
+# credential under the wrong name" are the same message to the reader, and the
+# second one is invisible. They are distinguishable from here: we know whether
+# we sent anything.
+MISSING_WORDS = ("missing", "not authenticated", "unauthenticated", "no credential",
+                 "no token", "not provided", "required")
+
+
+def credential_not_seen(headers, body):
+    """Did we send a credential the server behaved as though it never got?"""
+    said = (body or "").lower()
+    if not any(word in said for word in MISSING_WORDS):
+        return None                       # the server saw it and refused it
+    cookie = (headers or {}).get("Cookie") or (headers or {}).get("cookie")
+    if cookie:
+        name = cookie.split("=", 1)[0].strip() if "=" in cookie else cookie.strip()
+        return (f"You sent a cookie named `{name}`, but the server answered as though no "
+                f"credential arrived at all.\n  That is what a server does with a cookie "
+                f"name it does not read — the value is never even looked at. Check the "
+                f"name\n  in your browser's devtools (Application -> Cookies) and use "
+                f"that one.")
+    if (headers or {}).get("Authorization") or (headers or {}).get("authorization"):
+        return ("You sent an `Authorization` header, but the server answered as though no "
+                "credential arrived.\n  Some APIs read only a cookie and ignore that "
+                "header entirely. Try `Cookie: <name>=<value>`.")
+    return None
+
+
 def credential_age(headers):
     """What the credential being sent says about its own expiry, if anything."""
     try:
@@ -649,6 +678,9 @@ def run(spec, base_url, headers, args):
         # "Invalid token" says the server refused it, not why. If the credential
         # is a JWT it carries its own expiry, and reading that locally turns a
         # guess into an answer.
+        unseen = credential_not_seen(headers, blocked["body"])
+        if unseen:
+            print(f"  {unseen}")
         verdict = credential_age(headers)
         if verdict:
             print(f"  {verdict}")
