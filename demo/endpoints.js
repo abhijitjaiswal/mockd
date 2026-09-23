@@ -34,7 +34,7 @@ try {
 
 const resolved = {};
 for (const key of Object.keys(DEFAULTS)) {
-  resolved[key] = process.env[`CLAVIS_${key}`] || local[key] || DEFAULTS[key];
+  resolved[key] = process.env[`MOCKD_${key}`] || local[key] || DEFAULTS[key];
 }
 
 module.exports = resolved;
