@@ -852,7 +852,7 @@ class StateStore:
 
     @staticmethod
     def collection_of(route, path_params):
-        """'/api/v1/user/read/{user_id}' and '/api/v1/user/create' must land in
+        """'/api/v1/account/read/{account_id}' and '/api/v1/account/create' must land in
         the SAME bucket, or a created object is invisible to the reader."""
         path = route["path"]
         item_id = None
@@ -958,7 +958,7 @@ class StateStore:
             if item_id is not None and not store and method in ("GET", "PUT", "PATCH", "DELETE"):
                 # Nothing has been created or seeded for this collection — which
                 # is the normal state for a resource with no list endpoint, e.g.
-                # /api/v1/enums/{enum_name}. 404ing here would hide the spec's
+                # /api/v1/lookups/{lookup_name}. 404ing here would hide the spec's
                 # own payload forever; the store only takes over once it holds
                 # something.
                 return None, None

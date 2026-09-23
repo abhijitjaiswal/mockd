@@ -421,7 +421,7 @@
         <p class="hint" style="margin-top:0">One document for the whole system — the mock,
           the contract check, the tests, coverage and the Postman export all use this unless
           a module is deliberately pinned to something else. Saved in
-          <code>clavis.json</code>, which is committed, so changing it is a reviewable
+          <code>mockd.json</code>, which is committed, so changing it is a reviewable
           decision.</p>
         <div class="row">
           <div style="flex:1">
@@ -614,7 +614,7 @@
               </div>
               <div style="flex:1">
                 <label for="path">Path</label>
-                <input type="text" id="path" placeholder="/api/v1/user/list">
+                <input type="text" id="path" placeholder="/api/v1/account/list">
               </div>
             </div>
             <label for="query">Query string</label>
@@ -758,7 +758,7 @@
           </div>
           <div style="flex:1">
             <label for="liveOnly">Only (regex, optional)</label>
-            <input type="text" id="liveOnly" placeholder="GET /api/v1/user">
+            <input type="text" id="liveOnly" placeholder="GET /api/v1/account">
           </div>
         </div>
         <label for="liveAuthMode">How this API authenticates</label>

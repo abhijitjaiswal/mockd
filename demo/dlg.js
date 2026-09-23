@@ -1,4 +1,5 @@
 const { chromium } = require("playwright");
+const EP = require("./endpoints");
 const path = require("path");
 (async () => {
   const b = await chromium.launch();
@@ -9,7 +10,7 @@ const path = require("path");
   await p.waitForTimeout(2500);
   await p.locator('nav.side a[data-view="explore"]').click(); await p.waitForTimeout(700);
   await p.locator("#method").selectOption("GET");
-  await p.locator("#path").fill("/api/v1/user/list");
+  await p.locator("#path").fill(EP.LIST);
   await p.locator("#btnSend").click(); await p.waitForTimeout(1200);
   await p.locator("#btnSaveTest").click(); await p.waitForTimeout(1200);
   console.log("  section default :", await p.locator("#dlgSuite").inputValue());

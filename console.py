@@ -104,7 +104,7 @@ class MockProcess:
             cmd = [sys.executable, str(HERE / "mockd.py"),
                    "--spec", options["spec"],
                    "--port", str(options.get("port") or 4010),
-                   "--host", "127.0.0.1"]
+                   "--host", os.environ.get("MOCK_HOST", "127.0.0.1")]
             if options.get("overlay"):
                 cmd += ["--overlay", options["overlay"]]
             if options.get("stateful"):
@@ -248,9 +248,9 @@ def state():
 # What you last ran is what you almost certainly want next time. Kept out of
 # git: it is one person's working choice, not a decision the team shares —
 # that decision is spec.lock.json.
-PREFS_FILE = HERE / ".clavis-console.json"
+PREFS_FILE = HERE / ".mockd-console.json"
 # Deliberately NOT "spec": which document this project is about lives in
-# clavis.json, and two competing defaults is how you end up staring at
+# mockd.json, and two competing defaults is how you end up staring at
 # coverage for a document you thought you had replaced.
 REMEMBERED = ("overlay", "port", "array_items", "validation_mode",
               "stateful", "require_auth", "allow_undocumented", "headers")
@@ -420,7 +420,7 @@ def project_set():
     where = f"module {module}" if module else "the whole project"
     return jsonify({"ok": True, "spec": project.active_spec(), "modules": project.report(),
                     "mock_spec": mock.options.get("spec") if mock.running else None,
-                    "message": f"{where} now uses {spec} — commit clavis.json "
+                    "message": f"{where} now uses {spec} — commit mockd.json "
                                f"so the team shares it.{moved}"})
 
 
@@ -1681,7 +1681,7 @@ def verify_live():
         if token:
             value = token if token.lower().startswith(("bearer ", "basic ")) \
                 else f"Bearer {token}"
-            secret_env["CLAVIS_HEADER_1"] = f"Authorization: {value}"
+            secret_env["MOCKD_HEADER_1"] = f"Authorization: {value}"
     elif env_name:
         # no token given: let the environment authenticate however it is defined
         cmd += ["--env", env_name]
@@ -1689,7 +1689,7 @@ def verify_live():
     if base_url:
         cmd += ["--base-url", base_url]
     for i, raw in enumerate(raw_headers, start=2):
-        secret_env[f"CLAVIS_HEADER_{i}"] = raw
+        secret_env[f"MOCKD_HEADER_{i}"] = raw
     if payload.get("only"):
         cmd += ["--only", payload["only"]]
     for key in (payload.get("skip") or []):
@@ -1763,7 +1763,11 @@ def main():
     print(f"  working directory: {HERE}")
     print("  Ctrl-C stops the console; it also stops the mock it started.")
     try:
-        app.run(host="127.0.0.1", port=port, threaded=True)
+        # Loopback by default: this is a developer tool and binding every
+        # interface would put it on the office network. A container has to set
+        # CONSOLE_HOST=0.0.0.0 deliberately.
+        app.run(host=os.environ.get("CONSOLE_HOST", "127.0.0.1"), port=port,
+                threaded=True)
     finally:
         if mock.running:
             mock.stop()

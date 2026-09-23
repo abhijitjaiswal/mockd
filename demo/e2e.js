@@ -3,6 +3,7 @@
  * and assert the things are actually wired to each other.
  */
 const { chromium } = require("playwright");
+const EP = require("./endpoints");
 
 let pass = 0, fail = 0;
 const errs = [];
@@ -78,7 +79,7 @@ function check(name, ok, detail) {
         (await p.locator("#path").inputValue()).startsWith("/api/"));
 
   await p.locator("#method").selectOption("GET");
-  await p.locator("#path").fill("/api/v1/recruitment-settings/positions/departments");
+  await p.locator("#path").fill(EP.COLLECTION);
   await p.locator("#btnSend").click(); await p.waitForTimeout(1500);
   check("send returns 200", (await p.locator("#respHead").textContent()).includes("200"));
   check("response labelled with target",
@@ -101,7 +102,7 @@ function check(name, ok, detail) {
 
   // sample body for a POST
   await p.locator("#method").selectOption("POST");
-  await p.locator("#path").fill("/api/v1/recruitment-settings/positions/departments");
+  await p.locator("#path").fill(EP.COLLECTION);
   await p.locator("#btnSample").click(); await p.waitForTimeout(900);
   check("sample body filled", (await p.locator("#body").inputValue()).includes("title"));
   await p.locator("#btnBreak").click(); await p.waitForTimeout(400);
@@ -120,7 +121,7 @@ function check(name, ok, detail) {
   // ---------------------------------------------------------------- save a test
   console.log("\nSAVE AS TEST");
   await p.locator("#method").selectOption("GET");
-  await p.locator("#path").fill("/api/v1/user/list");
+  await p.locator("#path").fill(EP.LIST);
   await p.locator("#body").fill("");
   await p.locator("#btnSend").click(); await p.waitForTimeout(1200);
   await p.locator("#btnSaveTest").click(); await p.waitForTimeout(1200);
@@ -161,7 +162,7 @@ function check(name, ok, detail) {
   await p.locator("#liveUrl").fill("http://127.0.0.1:4010");
   await p.locator("#liveAuthMode").selectOption("bearer"); await p.waitForTimeout(300);
   await p.locator("#liveToken").fill("probe-token");
-  await p.locator("#liveOnly").fill("GET /api/v1/user/list$");
+  await p.locator("#liveOnly").fill(`GET ${EP.LIST}$`);
   await p.locator("#btnVerifyLive").click(); await p.waitForTimeout(9000);
   check("live result stayed on this view",
         await p.locator('.view[data-view="environments"].on').count() === 1);

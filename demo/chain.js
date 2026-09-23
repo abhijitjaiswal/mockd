@@ -1,4 +1,5 @@
 const { chromium } = require("playwright");
+const EP = require("./endpoints");
 const path=require("path");
 let pass=0,fail=0; const errs=[];
 const ck=(n,ok,d)=>{ok?pass++:fail++;console.log(`  ${ok?"ok  ":"FAIL"}  ${n}${ok||!d?"":"  — "+d}`)};
@@ -11,7 +12,7 @@ const ck=(n,ok,d)=>{ok?pass++:fail++;console.log(`  ${ok?"ok  ":"FAIL"}  ${n}${o
   // a TARGET step that cannot work without the setup that precedes it
   await p.locator('nav.side a[data-view="explore"]').click(); await p.waitForTimeout(700);
   await p.locator("#method").selectOption("POST");
-  await p.locator("#path").fill("/api/v1/recruitment-settings/positions/departments/{{departmentId}}/levels");
+  await p.locator("#path").fill(EP.NESTED);
   await p.locator("#body").fill(JSON.stringify({title:"Senior",level_order:1},null,2));
   await p.locator("#btnSend").click(); await p.waitForTimeout(1300);
   await p.locator("#btnSaveTest").click(); await p.waitForTimeout(1200);

@@ -9,9 +9,9 @@ file with `newman` tomorrow. Nothing here is mock-specific except the default
 or production.
 
     python postman.py --spec apis.json --base-url http://localhost:4010 \\
-        --out clavis.postman_collection.json
+        --out mockd.postman_collection.json
 
-    newman run clavis.postman_collection.json --env-var baseUrl=https://api.dev.example.com
+    newman run mockd.postman_collection.json --env-var baseUrl=https://api.dev.example.com
 
 What each request carries:
 
@@ -279,7 +279,7 @@ def main():
                                   "and writes a matching Postman environment file")
     ap.add_argument("--emit-environment", metavar="FILE",
                     help="Also write a Postman environment (secrets left blank)")
-    ap.add_argument("--out", default="clavis.postman_collection.json")
+    ap.add_argument("--out", default="mockd.postman_collection.json")
     ap.add_argument("--header", action="append", default=[], metavar="'K: V'",
                     help="Header used when fetching a spec URL, repeatable")
     args = ap.parse_args()

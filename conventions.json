@@ -1,0 +1,21 @@
+{
+  "_why": "House conventions the payload synthesiser applies when a spec declares no response shape. These defaults hold for most REST APIs. To add your own without committing them, put the same keys in conventions.local.json, which is gitignored and merged on top.",
+  "list_hints": [
+    "all",
+    "dashboard",
+    "dropdown",
+    "items",
+    "list",
+    "records",
+    "search",
+    "set",
+    "types"
+  ],
+  "resource_schemas": {},
+  "metadata_shapes": {},
+  "path_markers": {
+    "enums": "/enums/",
+    "metadata": "/metadata/",
+    "auth": "/auth/"
+  }
+}

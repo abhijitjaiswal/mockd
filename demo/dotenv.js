@@ -10,7 +10,7 @@ const path = require("path");
 
 // the suites live in <project>/demo, so the project is one level up
 const ENV_FILE = path.join(
-  process.env.CLAVIS_DIR || path.resolve(__dirname, ".."), ".env");
+  process.env.MOCKD_DIR || path.resolve(__dirname, ".."), ".env");
 
 /** Snapshot .env and restore it when the process exits. Returns nothing. */
 function guard(extra) {

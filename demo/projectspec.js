@@ -14,7 +14,7 @@ let pass = 0, fail = 0; const errs = [];
 const check = (n, ok, d) => { ok ? pass++ : fail++;
   console.log(`  ${ok ? "ok  " : "FAIL"}  ${n}${ok || !d ? "" : "  — " + d}`); };
 
-const DIR = process.env.CLAVIS_DIR || path.resolve(__dirname, "..");
+const DIR = process.env.MOCKD_DIR || path.resolve(__dirname, "..");
 const cli = (...a) => execFileSync("python3", [path.join(DIR, "project.py"), ...a],
                                    { cwd: DIR, encoding: "utf8" });
 
@@ -49,7 +49,7 @@ const cli = (...a) => execFileSync("python3", [path.join(DIR, "project.py"), ...
   check("choosing one sets it everywhere",
         (await p.locator("#projSpecTag").textContent()).trim() === "specs/fetched.json");
   check("and says to commit the decision",
-        /commit clavis\.json/.test(await p.locator("#toast").textContent()),
+        /commit mockd\.json/.test(await p.locator("#toast").textContent()),
         await p.locator("#toast").textContent());
 
   // the CLI agrees — this is the point of the whole change

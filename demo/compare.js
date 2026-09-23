@@ -14,7 +14,7 @@ let pass = 0, fail = 0; const errs = [];
 const check = (n, ok, d) => { ok ? pass++ : fail++;
   console.log(`  ${ok ? "ok  " : "FAIL"}  ${n}${ok || !d ? "" : "  — " + d}`); };
 
-const DIR = process.env.CLAVIS_DIR || path.resolve(__dirname, "..");
+const DIR = process.env.MOCKD_DIR || path.resolve(__dirname, "..");
 const SPECS = path.join(DIR, "specs");
 
 function spec({ reqRequired = ["name"], reqProps = { name: { type: "string" } },

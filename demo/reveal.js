@@ -1,4 +1,5 @@
 const { chromium } = require("playwright");
+const EP = require("./endpoints");
 const { guard } = require("./dotenv");
 
 /* This suite needs one environment that actually resolves, so it provisions a
@@ -31,7 +32,7 @@ const check = (n, ok, d) => { ok ? pass++ : fail++;
   check("appears once a real environment is chosen", await p.locator("#btnCurlReal").isVisible());
 
   await p.locator("#method").selectOption("GET");
-  await p.locator("#path").fill("/api/v1/application-questions/groups");
+  await p.locator("#path").fill(EP.GROUPS);
 
   await p.locator("#btnCurl").click(); await p.waitForTimeout(900);
   const safe = await p.evaluate(() => navigator.clipboard.readText());

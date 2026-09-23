@@ -23,71 +23,43 @@ with no overlay entry and no code change. Curating it later only improves it.
 import copy
 import random
 
+import json
+from pathlib import Path
 from generator import generate_from_schema
 
 # ----------------------------------------------------------------------------
 # House conventions
 # ----------------------------------------------------------------------------
 
-LIST_HINTS = {
-    "list", "all", "dropdown", "search", "dashboard", "groups", "questions",
-    "secrets", "mappings", "levels", "positions", "departments", "types",
-    "cities", "states", "countries", "currencies", "languages", "phonecodes",
-    "regions", "skills", "all-cities", "set", "items", "records",
-}
+# House conventions live in conventions.json, not in this file. What counts as
+# a "list" endpoint, which component schema backs a resource, and what an
+# undocumented metadata route should return are all facts about the API being
+# mocked — not about the mock. Shipping them as code made this tool quietly
+# specific to one company's spec; as data, anyone can add their own in
+# conventions.local.json without editing or committing anything.
 
-RESOURCE_SCHEMA_HINTS = {
-    "user": ["UserCreateSchema", "UserUpdateSchema"],
-    "role": ["RoleCreateSchema", "RoleUpdateSchema"],
-    "address": ["AddressCreateSchema", "AddressUpdateSchema"],
-    "device": ["DeviceCreateSchema", "DeviceUpdateSchema"],
-    "requisition": ["RequisitionSchema"],
-    "integrations": ["IntegrationCreate", "IntegrationUpdate"],
-    "secrets": ["IntegrationSecretCreate", "IntegrationSecretUpdate"],
-}
+def _load_conventions():
+    here = Path(__file__).resolve().parent
+    merged = {"list_hints": [], "resource_schemas": {}, "metadata_shapes": {},
+              "path_markers": {"enums": "/enums/", "metadata": "/metadata/",
+                               "auth": "/auth/"}}
+    for name in ("conventions.json", "conventions.local.json"):
+        try:
+            doc = json.loads((here / name).read_text())
+        except (OSError, ValueError):
+            continue
+        merged["list_hints"] = sorted(set(merged["list_hints"])
+                                      | set(doc.get("list_hints") or []))
+        for key in ("resource_schemas", "metadata_shapes", "path_markers"):
+            merged[key] = {**merged[key], **(doc.get(key) or {})}
+    return merged
 
-# Metadata endpoints carry no schema anywhere in the spec. These are the
-# conventional shapes for the data they serve; correct them if the API differs.
-METADATA_SHAPES = {
-    "country-data": lambda: {"countries": 250, "states": 5038, "cities": 151024},
-    "all-cities": lambda: [
-        {"id": 57582, "name": "Bengaluru", "state_id": 4023, "country_id": 101},
-        {"id": 57589, "name": "Pune", "state_id": 4008, "country_id": 101},
-    ],
-    "countries": lambda: [
-        {"id": 101, "name": "India", "iso2": "IN", "iso3": "IND",
-         "phone_code": "91", "currency": "INR", "region": "Asia"},
-        {"id": 233, "name": "United States", "iso2": "US", "iso3": "USA",
-         "phone_code": "1", "currency": "USD", "region": "Americas"},
-    ],
-    "states": lambda: [
-        {"id": 4023, "name": "Karnataka", "state_code": "KA", "country_id": 101},
-        {"id": 4008, "name": "Maharashtra", "state_code": "MH", "country_id": 101},
-    ],
-    "cities": lambda: [
-        {"id": 57582, "name": "Bengaluru", "state_id": 4023, "country_id": 101,
-         "latitude": "12.97194", "longitude": "77.59369"},
-        {"id": 57589, "name": "Pune", "state_id": 4008, "country_id": 101,
-         "latitude": "18.51957", "longitude": "73.85535"},
-    ],
-    "currencies": lambda: [
-        {"id": 1, "name": "Indian Rupee", "code": "INR", "symbol": "₹"},
-        {"id": 2, "name": "US Dollar", "code": "USD", "symbol": "$"},
-    ],
-    "languages": lambda: [
-        {"id": 1, "name": "English", "code": "en"},
-        {"id": 2, "name": "Hindi", "code": "hi"},
-    ],
-    "phonecodes": lambda: [
-        {"id": 101, "name": "India", "iso2": "IN", "phone_code": "91"},
-        {"id": 233, "name": "United States", "iso2": "US", "phone_code": "1"},
-    ],
-    "regions": lambda: [{"id": 1, "name": "Asia"}, {"id": 2, "name": "Americas"}],
-    "skills": lambda: [
-        {"id": 1, "name": "Python", "category": "Programming"},
-        {"id": 2, "name": "React", "category": "Frontend"},
-    ],
-}
+
+CONVENTIONS = _load_conventions()
+LIST_HINTS = set(CONVENTIONS["list_hints"])
+RESOURCE_SCHEMA_HINTS = CONVENTIONS["resource_schemas"]
+METADATA_SHAPES = CONVENTIONS["metadata_shapes"]
+MARKERS = CONVENTIONS["path_markers"]
 
 UUID_SCHEMA = {"type": "string", "format": "uuid"}
 
@@ -101,7 +73,7 @@ def paginate(items, page=1, page_size=10):
 
 
 def resource_of(path):
-    """'/api/v1/user/read/{user_id}' -> 'user'."""
+    """'/api/v1/account/read/{account_id}' -> 'user'."""
     parts = [p for p in path.strip("/").split("/") if not p.startswith("{")]
     parts = [p for p in parts if p not in ("api", "v1")]
     return parts[0] if parts else ""
@@ -154,7 +126,7 @@ def entity_from_request(route, spec, rng):
 
 def entity_from_components(route, spec, rng):
     """GET/DELETE have no request body — match a component schema by resource
-    name, so a newly added /api/v1/offer/read/{id} picks up OfferCreateSchema
+    name, so a newly added /api/v1/quote/read/{id} picks up QuoteCreateSchema
     or OfferOut without anyone configuring anything."""
     schemas = (spec.doc.get("components") or {}).get("schemas") or {}
     res = resource_of(route["path"])
@@ -176,7 +148,7 @@ def entity_from_components(route, spec, rng):
 
 
 def enum_payload(spec, enum_name=None):
-    """GET /api/v1/enums/{enum_name} — the spec already carries every enum, so
+    """GET /api/v1/lookups/{lookup_name} — the spec already carries every enum, so
     serve the real values instead of a placeholder."""
     schemas = (spec.doc.get("components") or {}).get("schemas") or {}
     candidates = {k: v for k, v in schemas.items() if v.get("enum")}
@@ -207,10 +179,10 @@ def synthesise_success(route, spec, rng=None, path_params=None):
     summary = route["summary"] or route["key"]
     res = resource_of(path)
 
-    if "/enums/" in path:
+    if MARKERS["enums"] in path:
         return enum_payload(spec, (path_params or {}).get("enum_name"))
 
-    if "/metadata/" in path:
+    if MARKERS["metadata"] in path:
         for key, factory in METADATA_SHAPES.items():
             if key in path:
                 data = factory()
@@ -221,7 +193,7 @@ def synthesise_success(route, spec, rng=None, path_params=None):
                 return envelope(f"{key.replace('-', ' ').title()} fetched successfully",
                                 paginate(data))
 
-    if "/auth/" in path:
+    if MARKERS["auth"] in path:
         if "login" in path:
             return envelope("Login successful", {
                 "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.mock.access",

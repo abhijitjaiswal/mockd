@@ -281,7 +281,7 @@ READ_DEADLINE = 15                  # seconds spent reading one body
 def _read_capped(resp, limit=MAX_BODY, seconds=READ_DEADLINE):
     """Read a response body that might never end.
 
-    A streaming endpoint (this spec has /api/v1/user/stream/{user_id}) keeps the
+    A streaming endpoint (this spec has /api/v1/account/stream/{account_id}) keeps the
     connection open and trickles data, so a plain .read() blocks forever and the
     socket timeout never fires — the socket is not idle, it is just never done.
     Read in chunks against a wall clock instead, and say so when truncated."""
@@ -1203,7 +1203,7 @@ def main():
 
     brief = sub.add_parser("prompt",
                            help="print the context an assistant needs to write tests")
-    brief.add_argument("--operation", help="e.g. 'GET /api/v1/user/list'")
+    brief.add_argument("--operation", help="e.g. 'GET /api/v1/account/list'")
     brief.add_argument("--spec", default=None)
     brief.add_argument("--base-url", help="fetch a real sample response from here")
 

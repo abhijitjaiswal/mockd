@@ -130,7 +130,7 @@ def is_stream(headers):
 def _read_capped(resp, limit=MAX_BODY, seconds=READ_DEADLINE):
     """Read a response body that might never end.
 
-    A streaming endpoint (this spec has /api/v1/user/stream/{user_id}) keeps the
+    A streaming endpoint (this spec has /api/v1/account/stream/{account_id}) keeps the
     connection open and trickles data, so a plain .read() blocks forever and the
     socket timeout never fires — the socket is not idle, it is just never done.
     Read in chunks against a wall clock instead, and say so when truncated."""
@@ -456,7 +456,7 @@ Nothing was authenticated, so every finding below is the same finding.
 
   * Check the credential first, not the contract. A token that is expired, or
     sent the way this API does not read, produces exactly this shape of report.
-  * This spec's own login endpoint (POST /api/v1/auth/dev-login) replies with
+  * This spec's own login endpoint (POST /api/v1/auth/session) replies with
     Set-Cookie, and the API reads a COOKIE — an `Authorization: Bearer ...`
     header is ignored by a server like that, and it will still say the token is
     missing. Send `Cookie: <name>=<value>`, or use an environment with
@@ -887,8 +887,8 @@ def main():
         base, headers, note = environments.headers_for(args.env)
         args.base_url = args.base_url or base
         print(f"env: {args.env} -> {args.base_url} ({note})")
-    # CLAVIS_HEADER_n keeps credentials out of argv, where `ps` would show them
-    extra = [os.environ[k] for k in sorted(os.environ) if k.startswith("CLAVIS_HEADER_")]
+    # MOCKD_HEADER_n keeps credentials out of argv, where `ps` would show them
+    extra = [os.environ[k] for k in sorted(os.environ) if k.startswith("MOCKD_HEADER_")]
     for raw in list(args.header) + extra:
         if ":" not in raw:
             raise SystemExit(f"--header must look like 'Name: value', got {raw!r}")

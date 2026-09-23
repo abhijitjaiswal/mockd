@@ -8,7 +8,7 @@ mock happened to be running. So "which document am I being judged against?"
 depended on which door you came through — the exact confusion this product
 exists to remove.
 
-One project-wide answer lives in clavis.json, and any single module may be
+One project-wide answer lives in mockd.json, and any single module may be
 pinned to a different document when there is a reason:
 
     python project.py show
@@ -16,7 +16,7 @@ pinned to a different document when there is a reason:
     python project.py use apis.json --for tests         # just this module
     python project.py clear --for tests                 # back to the global one
 
-clavis.json is committed on purpose. Which document the team builds against is
+mockd.json is committed on purpose. Which document the team builds against is
 a shared decision, the same category as spec.lock.json, and it belongs in
 review. A module override is committed too — a deliberate, visible exception,
 not a surprise.
@@ -24,10 +24,10 @@ not a surprise.
 Resolution, narrowest wins:
 
     1. an explicit --spec on the command
-    2. $CLAVIS_SPEC_<MODULE>      e.g. CLAVIS_SPEC_VERIFY=specs/old.json
-    3. $CLAVIS_SPEC              one command, any module
-    4. clavis.json -> modules.<module>
-    5. clavis.json -> spec
+    2. $MOCKD_SPEC_<MODULE>      e.g. MOCKD_SPEC_VERIFY=specs/old.json
+    3. $MOCKD_SPEC              one command, any module
+    4. mockd.json -> modules.<module>
+    5. mockd.json -> spec
     6. apis.json
 
 Modules are named after the tool: mock, verify, tests, postman, overlay,
@@ -39,14 +39,14 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-CONFIG = HERE / "clavis.json"
+CONFIG = HERE / "mockd.json"
 FALLBACK = "apis.json"
 MODULES = ("mock", "verify", "tests", "postman", "overlay", "coverage", "authoring")
 
 
 def _first_present():
     """Nothing chosen yet: name a document that is actually here, so a fresh
-    clone with no clavis.json still points at something real."""
+    clone with no mockd.json still points at something real."""
     for candidate in (FALLBACK, "sample_spec.yaml", "openapi.json", "swagger.json"):
         if (HERE / candidate).exists():
             return candidate
@@ -68,7 +68,7 @@ def load():
 
 
 def _module_env(module):
-    return f"CLAVIS_SPEC_{module.upper()}" if module else None
+    return f"MOCKD_SPEC_{module.upper()}" if module else None
 
 
 def resolve(explicit=None, module=None):
@@ -78,8 +78,8 @@ def resolve(explicit=None, module=None):
     name = _module_env(module)
     if name and os.environ.get(name):
         return os.environ[name], f"${name}"
-    if os.environ.get("CLAVIS_SPEC"):
-        return os.environ["CLAVIS_SPEC"], "$CLAVIS_SPEC"
+    if os.environ.get("MOCKD_SPEC"):
+        return os.environ["MOCKD_SPEC"], "$MOCKD_SPEC"
     doc = load()
     per_module = (doc.get("modules") or {}).get(module) if module else None
     if per_module:
@@ -102,7 +102,7 @@ def active_overlay(explicit=None, module=None):
         return explicit
     doc = load()
     per_module = (doc.get("overlays") or {}).get(module) if module else None
-    return (os.environ.get("CLAVIS_OVERLAY") or per_module
+    return (os.environ.get("MOCKD_OVERLAY") or per_module
             or doc.get("overlay") or "")
 
 
@@ -121,7 +121,7 @@ def set_active(spec=None, overlay=None, module=None):
     doc.setdefault("_why", "The document this project is about. Committed: which spec "
                            "the team builds against is a shared decision. Per-module "
                            "entries are deliberate exceptions. Override one command "
-                           "with CLAVIS_SPEC=...")
+                           "with MOCKD_SPEC=...")
     CONFIG.write_text(json.dumps(doc, indent=2) + "\n")
     return doc
 
@@ -141,7 +141,7 @@ def report():
         spec, why = resolve(None, module)
         exists = (HERE / spec).exists() or spec.lower().startswith(("http://", "https://"))
         rows.append({"module": module, "spec": spec, "from": why, "exists": exists,
-                     "overridden": "modules." in why or why.startswith("$CLAVIS_SPEC_")})
+                     "overridden": "modules." in why or why.startswith("$MOCKD_SPEC_")})
     return rows
 
 

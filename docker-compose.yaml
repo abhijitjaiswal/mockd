@@ -1,0 +1,35 @@
+# One command from a clean checkout to a running console:
+#
+#     docker compose up
+#
+# then open http://localhost:4100. The mock the console starts is reachable at
+# http://localhost:4010, which is the URL your UI points at.
+
+services:
+  mockd:
+    build: .
+    image: mockd:latest
+    container_name: mockd
+    ports:
+      - "${CONSOLE_PORT:-4100}:4100"     # the console
+      - "${MOCK_PORT:-4010}:4010"        # the mock the console starts
+    environment:
+      CONSOLE_HOST: "0.0.0.0"
+      MOCK_HOST: "0.0.0.0"
+      CONSOLE_PORT: "4100"
+    volumes:
+      # Your API documents and anything the tool writes live on the host, so
+      # they survive a rebuild and never end up baked into the image.
+      - ./specs:/app/specs
+      - ./tests:/app/tests
+      - ./logs:/app/logs
+      # Local overrides — mockd.json, environments.local.json,
+      # conventions.local.json — are NOT mounted individually on purpose:
+      # Docker creates a DIRECTORY when a bind source does not exist yet, which
+      # silently breaks the file it was meant to provide. Mount the project
+      # instead if you want them, or set values through .env below.
+      # - .:/app
+    env_file:
+      - path: .env                        # ${VAR} values for environments.json
+        required: false
+    restart: unless-stopped

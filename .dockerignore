@@ -1,0 +1,30 @@
+# Keep the image generic: the tool goes in, your API's documents do not.
+# docker-compose mounts specs/, tests/ and the local config at run time, so
+# nothing here is missing at runtime — it is just not baked into a layer that
+# could be pushed to a registry.
+apis.json
+specs/
+mock_overlay.json
+learned_overlay.json
+spec.lock.json
+mockd.json
+*.postman_collection.json
+conventions.local.json
+environments.local.json
+.env
+.mockd-console.json
+
+# build and editor noise
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.pyc
+logs
+tests/drafts
+demo/node_modules
+demo/shots
+demo/*.mp4
+demo/*.zip
+.DS_Store

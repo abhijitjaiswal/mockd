@@ -30,11 +30,11 @@
       }
     },
     "dev": {
-      "description": "Shared dev backend. This API reads a COOKIE \u2014 an Authorization: Bearer header is ignored and the server still says the token is missing. /api/v1/auth/dev-login takes username and password as QUERY params and replies with Set-Cookie, so the cookie jar is what gets reused.",
+      "description": "Shared dev backend. This example assumes an API that authenticates by COOKIE: the login route replies with Set-Cookie and an Authorization header is ignored. Point `auth.login.path` at your own login route.",
       "base_url": "${DEV_BASE_URL}",
       "auth": {
         "mode": "login",
-        "path": "/api/v1/auth/dev-login",
+        "path": "/api/v1/auth/session",
         "method": "POST",
         "send": "query",
         "username_field": "username",
@@ -68,7 +68,7 @@
       "base_url": "http://localhost:4010",
       "auth": {
         "mode": "login",
-        "path": "/api/v1/auth/dev-login",
+        "path": "/api/v1/auth/session",
         "method": "POST",
         "send": "query",
         "username": "qa.bot@example.com",

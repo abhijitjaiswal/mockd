@@ -1279,7 +1279,7 @@ await page.route('**/api/**', (route) =>
       <summary>What happens when the request is wrong</summary>
       <div class="snips" style="margin-top:9px">
         ${snip("Missing or invalid fields -> 422 (same shape as the real API)",
-`POST ${base}/api/v1/user/create   {"username": "x"}
+`POST ${base}/api/v1/account/create   {"username": "x"}
 
 422 Unprocessable Entity
 {"detail": [
@@ -1287,13 +1287,13 @@ await page.route('**/api/**', (route) =>
   {"loc": ["body","email"],    "msg": "Field required",   "type": "missing"}
 ]}`)}
         ${snip("Bad query param -> 422",
-`GET ${base}/api/v1/user/list?status=Bogus
+`GET ${base}/api/v1/account/list?status=Bogus
 
 422 {"detail": [{"loc": ["query","status"],
      "msg": "'Bogus' not in allowed values ['Online','Offline','Away']",
      "type": "enum"}]}`)}
         ${snip("Missing required query param -> 422",
-`GET ${base}/api/v1/metadata/cities
+`GET ${base}/api/v1/reference/cities
 
 422 {"detail": [
   {"loc": ["query","country_id"], "msg": "required parameter missing", "type": "missing"},
@@ -1304,8 +1304,8 @@ await page.route('**/api/**', (route) =>
 404 {"mock_error": "no operation GET /api/v1/nope in spec",
      "hint": "path not in spec — check /_mock/routes"}
 
-POST ${base}/api/v1/user/list
-404 {"hint": "path exists but not for POST; documented: ['/api/v1/user/list']"}`)}
+POST ${base}/api/v1/account/list
+404 {"hint": "path exists but not for POST; documented: ['/api/v1/account/list']"}`)}
       </div>
       <p class="hint">Every rejection is logged with the full field-by-field reason — see
         <b>Recent requests</b> below, or <code>${esc(base)}/_mock/log</code>. Switch
@@ -1324,7 +1324,7 @@ X-Mock-Example: cancelled   pick a named example from the spec
 
 Responses come back tagged so you know where the body came from:
 X-Mock-Source: overlay | spec:example | generated | synthesized | stateful
-X-Mock-Operation: GET /api/v1/user/list`)}</pre></div>
+X-Mock-Operation: GET /api/v1/account/list`)}</pre></div>
     </details>`;
 
   document.querySelectorAll(".copy").forEach((b) =>
@@ -1502,7 +1502,7 @@ function renderModulePins(modules, projectSpec) {
         ? `${pinned.length} module(s) deliberately pinned away from `
           + `<code>${esc(projectSpec)}</code>.`
         : "Everything follows the project spec."}
-        Pin one for a single run with <code>CLAVIS_SPEC_VERIFY=…</code>.</p>
+        Pin one for a single run with <code>MOCKD_SPEC_VERIFY=…</code>.</p>
     </div>`;
   $("projModules").querySelectorAll("[data-unpin]").forEach((b) =>
     b.addEventListener("click", () => setProjectSpec(null, b.dataset.unpin, true)));

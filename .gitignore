@@ -10,11 +10,11 @@ apis.json
 mock_overlay.json
 learned_overlay.json
 spec.lock.json
-clavis.json
+mockd.json
 
 # --- working state ---------------------------------------------------------
 tests/drafts/
-.clavis-console.json
+.mockd-console.json
 logs/
 server.log
 verify_report.*
@@ -37,3 +37,7 @@ demo/*.zip
 # --- generated from your API, not part of the tool -------------------------
 *.postman_collection.json
 tests/*.json
+
+# --- local overrides: your API's shape, never the tool's ------------------
+conventions.local.json
+demo/endpoints.local.js

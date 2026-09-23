@@ -197,9 +197,9 @@ served from, and `GET /_mock/drift` lists the ones still uncurated.
 Nothing to restart, nothing to regenerate:
 
 ```
-GET /api/v1/offer/list  ->  404          # not in the spec yet
+GET /api/v1/quote/list  ->  404          # not in the spec yet
                                           # backend adds it to apis.json / redeploys
-GET /api/v1/offer/list  ->  200  X-Mock-Source: synthesized
+GET /api/v1/quote/list  ->  200  X-Mock-Source: synthesized
 {"status_code":200,"message":"List Offers successful",
  "data":{"items":[{"id":"...","candidate_name":"Aarav Sharma","ctc":2400000,
                    "status":"Draft","joining_date":"2026-03-13", ...}],
@@ -213,7 +213,7 @@ Then, when the payload is worth pinning down:
 
 ```bash
 python build_overlay.py --spec apis.json --out mock_overlay.json
-#   + GET /api/v1/offer/list          <- new operations get an entry
+#   + GET /api/v1/quote/list          <- new operations get an entry
 #   hand-edited bodies are preserved; removed operations are flagged, not deleted
 ```
 
@@ -240,10 +240,10 @@ an id that exists rather than a random uuid that 404s.
 96 operations: 12 ok  37 warning  0 error  47 skipped
 
 UNDOCUMENTED STATUS (1) — the API returned something the swagger doc does not mention:
-  500  GET /api/v1/requisition/dashboard  (documented: 200, 422)
+  500  GET /api/v1/report/dashboard  (documented: 200, 422)
 
 CONTRACT VIOLATIONS (2) — the body does not match its own schema:
-  GET /api/v1/recruitment-settings/positions/mappings
+  GET /api/v1/widget-links
       data/items/0/level_title: None is not of type 'string'
 
 UNVERIFIABLE (37) — the spec declares no response shape, so nothing could be checked.
@@ -321,7 +321,7 @@ whatever the mock returns. FastAPI answers a bad request with 422 and
 `{"detail": [{"loc", "msg", "type"}]}`, so mockd does too:
 
 ```
-POST /api/v1/user/create   {"username": "x"}
+POST /api/v1/account/create   {"username": "x"}
 
 422 Unprocessable Entity
 {"detail": [
@@ -357,7 +357,7 @@ headers, query, body and all. The result runs as pasted, in a terminal or
 through Postman's *Import > Raw text*:
 
 ```bash
-curl -X POST 'http://localhost:4010/api/v1/recruitment-settings/positions/departments' \
+curl -X POST 'http://localhost:4010/api/v1/widgets' \
   -H 'Accept: application/json' \
   -H 'Content-Type: application/json' \
   -d '{
@@ -370,7 +370,7 @@ curl -X POST 'http://localhost:4010/api/v1/recruitment-settings/positions/depart
 
 ```bash
 python postman.py --spec apis.json --base-url http://localhost:4010 \
-    --out clavis.postman_collection.json
+    --out mockd.postman_collection.json
 ```
 
 96 requests across 16 folders. Each one carries a body generated from its own
@@ -426,7 +426,7 @@ Nothing in it is mock-specific except the `baseUrl` variable, so the same file
 runs against a real environment:
 
 ```bash
-newman run clavis.postman_collection.json --env-var baseUrl=https://api.dev.example.com
+newman run mockd.postman_collection.json --env-var baseUrl=https://api.dev.example.com
 ```
 
 That is the handoff: Postman by hand now, `newman` in the pipeline later, and
@@ -473,7 +473,7 @@ sanity. A failure anywhere fails the flow.
   "kind": "api",
   "steps": [
     { "role": "setup", "name": "create the parent department",
-      "request": { "method": "POST", "path": "/api/v1/recruitment-settings/positions/departments",
+      "request": { "method": "POST", "path": "/api/v1/widgets",
                    "body": { "title": "{{departmentTitle}}" } },
       "assertions": [ { "type": "status", "in": [200, 201] } ],
       "capture": { "departmentId": "data.id" } },
@@ -667,9 +667,9 @@ and a **Cancel** button. A slow run and a stuck run no longer look the same.
 ```
 RESULT                                              24 / 34   [Raw log]
 target: http://127.0.0.1:4010   auth: none
-  WARN  200  306ms  GET /api/v1/metadata/phonecodes
-  WARN  200  310ms  GET /api/v1/metadata/all-cities
-  PASS  200  405ms  GET /api/v1/application-questions/groups
+  WARN  200  306ms  GET /api/v1/reference/phonecodes
+  WARN  200  310ms  GET /api/v1/reference/all-cities
+  PASS  200  405ms  GET /api/v1/forms/sections
 ```
 
 **Raw log** toggles to the unparsed output. On the command line the same lines
@@ -915,9 +915,9 @@ python mockd.py --spec apis.json --stateful
 `POST` creates, `GET /…/{id}` returns it, `PUT/PATCH` update, `DELETE` removes,
 missing ids 404 — so create → verify → cleanup flows work against the mock.
 
-It understands this API's verb-in-path shape: `/api/v1/user/create`,
-`/api/v1/user/list`, `/api/v1/user/read/{id}`, `/api/v1/user/update/{id}` and
-`/api/v1/user/delete/{id}` all resolve to one `/api/v1/user` collection. The
+It understands this API's verb-in-path shape: `/api/v1/account/create`,
+`/api/v1/account/list`, `/api/v1/account/read/{id}`, `/api/v1/account/update/{id}` and
+`/api/v1/account/delete/{id}` all resolve to one `/api/v1/account` collection. The
 store is seeded from the overlay at startup, so lists are populated before
 anything has been created; `--no-seed` starts empty.
 

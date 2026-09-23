@@ -23,7 +23,7 @@ Three ways to authenticate:
   token   a token you already have: sent as a header, Bearer by default
   login   call a login endpoint and use what it gives back — a token read out
           of the JSON, or the cookies it sets, which is what this API does
-          (/api/v1/auth/dev-login takes username+password as query params and
+          (/api/v1/auth/session takes username+password as query params and
           replies with Set-Cookie, no bearer token anywhere)
 """
 import argparse

@@ -6,6 +6,7 @@
  * be on screen. The PNGs become the pages of the deck troupe narrates.
  */
 const { chromium } = require("playwright");
+const EP = require("./endpoints");
 const fs = require("fs");
 const path = require("path");
 
@@ -97,7 +98,7 @@ async function titleCard(page, name, heading, sub) {
   await card(page, "#collHint", "marks", "which endpoints are worth exploring");
 
   await page.locator("#method").selectOption("GET");
-  await page.locator("#path").fill("/api/v1/recruitment-settings/positions/departments");
+  await page.locator("#path").fill(EP.COLLECTION);
   await page.locator("#query").fill("page=1&page_size=10");
   await page.locator("#btnSend").click();
   await page.waitForTimeout(1000);
@@ -124,7 +125,7 @@ async function titleCard(page, name, heading, sub) {
   await page.waitForTimeout(1200);
   await view(page, "explore");
   await page.locator("#method").selectOption("GET");
-  await page.locator("#path").fill("/api/v1/recruitment-settings/positions/departments");
+  await page.locator("#path").fill(EP.COLLECTION);
   await view(page, "explore");
   await page.locator("#btnSend").click();
   await page.waitForTimeout(1000);

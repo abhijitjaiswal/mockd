@@ -9,8 +9,8 @@
 const { chromium } = require("playwright");
 
 // A real host is needed to prove a fetch failure reaches the screen. Point it
-// at your own with CLAVIS_SPEC_HOST; the default is a public sample API.
-const HOST = process.env.CLAVIS_SPEC_HOST || "https://petstore3.swagger.io";
+// at your own with MOCKD_SPEC_HOST; the default is a public sample API.
+const HOST = process.env.MOCKD_SPEC_HOST || "https://petstore3.swagger.io";
 
 let pass = 0, fail = 0; const errs = [];
 const check = (n, ok, d) => { ok ? pass++ : fail++;

@@ -226,7 +226,7 @@ Everything above, on one endpoint:
 
 ```yaml
 paths:
-  /api/v1/departments:
+  /api/v1/widgets:
     post:
       tags: [departments]
       operationId: create_department
