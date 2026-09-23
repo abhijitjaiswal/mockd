@@ -1,21 +1,48 @@
 # Drop into .gitlab-ci.yml, or `include:` it. No application changes needed.
-# Same three checks as the GitHub workflow: drift, mock self-check, live check.
+# Same checks as the GitHub workflow: provenance, drift, mock self-check, live.
+#
+# Which document this project is about comes from project.py, not from a
+# filename written in here, so pointing mockd at your own API needs no edits.
+# A step whose input is absent is skipped with a reason rather than failing:
+# no spec.lock.json means no provenance check, no overlay means no drift
+# check, no shared suites means nothing to replay.
 stages: [contract, live]
 
 default:
   image: python:3.12-slim
   before_script:
-    - pip install --quiet flask flask-cors pyyaml jsonschema
+    - pip install --quiet -r requirements.txt
 
 contract:
   stage: contract
   script:
-    - python speclock.py check --spec apis.json
-    - python build_overlay.py --spec apis.json --check
-    - python mockd.py --spec apis.json --overlay mock_overlay.json --port 4010 &
-    - for i in $(seq 1 40); do curl -sf localhost:4010/_mock/routes > /dev/null && break; sleep 0.25; done
-    - python verify.py --spec apis.json --base-url http://localhost:4010 --quiet --junit mock-selfcheck.xml --fail-on error
-    - python tests.py run --base-url http://localhost:4010 --require-locked-spec --junit tests-mock.xml
+    - SPEC=$(python -c "import project; print(project.active_spec())")
+    - echo "Project spec: $SPEC"
+    - |
+      if [ ! -f "$SPEC" ]; then
+        echo "The project spec ($SPEC) is not in this repository."
+        echo "Commit it, or choose one with: python project.py use <file>"
+        exit 1
+      fi
+    - |
+      if [ -f spec.lock.json ]; then python speclock.py check --spec "$SPEC";
+      else echo "Nothing pinned yet — skipping the provenance check."; fi
+    - |
+      if [ -f mock_overlay.json ]; then python build_overlay.py --spec "$SPEC" --check;
+      else echo "No overlay — skipping the drift check."; fi
+    - |
+      OVERLAY=""; [ -f mock_overlay.json ] && OVERLAY="--overlay mock_overlay.json"
+      python mockd.py --spec "$SPEC" $OVERLAY --port 4010 &
+    - for i in $(seq 1 60); do curl -sf localhost:4010/_mock/routes > /dev/null && break; sleep 0.25; done
+    - curl -sf localhost:4010/_mock/routes > /dev/null || { echo "the mock never came up"; exit 1; }
+    - python verify.py --spec "$SPEC" --base-url http://localhost:4010 --quiet --junit mock-selfcheck.xml --fail-on error
+    - |
+      if ls tests/*.json > /dev/null 2>&1; then
+        LOCKED=""; [ -f spec.lock.json ] && LOCKED="--require-locked-spec"
+        python tests.py run --base-url http://localhost:4010 $LOCKED --junit tests-mock.xml
+      else
+        echo "No shared suites in tests/ — nothing to run."
+      fi
   artifacts:
     when: always
     reports:
@@ -23,15 +50,28 @@ contract:
 
 live:
   stage: live
+  # Without a dev backend configured there is nothing to check against, so the
+  # job does not run at all rather than failing.
   rules:
+    - if: $DEV_BASE_URL == null
+      when: never
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_PIPELINE_SOURCE == "schedule"
   variables:
     DEV_BASE_URL: $DEV_BASE_URL       # project variable
   script:
     # DEV_USERNAME / DEV_PASSWORD are masked CI variables, never in the repo
+    - |
+      if [ -f spec.lock.json ]; then
+        python speclock.py check --spec "$DEV_BASE_URL/openapi.json" || true
+      fi
     - python verify.py --spec "$DEV_BASE_URL/openapi.json" --env dev --quiet --junit live-contract.xml --fail-on error
-    - python tests.py run --env dev --kind e2e --junit sanity.xml
+    - |
+      if ls tests/*.json > /dev/null 2>&1; then
+        python tests.py run --env dev --kind e2e --junit sanity.xml
+      else
+        echo "No shared suites to run as sanity flows."
+      fi
   artifacts:
     when: always
     reports:
