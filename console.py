@@ -1626,6 +1626,35 @@ def set_environment_vars():
                                f"gitignored, and read live, so no restart is needed"})
 
 
+def probe_credential(headers, base_url):
+    """One real read, so "the credential works" is a fact and not an assumption.
+
+    Returns None when there is nothing to probe against."""
+    if not base_url:
+        return None
+    try:
+        import verify as verifymod
+        from mockd import Source, Spec
+        spec_path = project.active_spec()
+        src = Source(spec_path, poll=0, cache_dir=str(LOG_DIR))
+        text, _ = src.read(force=True)
+        if text is None:
+            return None
+        spec = Spec(text=text, origin=spec_path)
+        blocked = verifymod.auth_probe(spec, base_url, headers, 20)
+    except Exception:
+        return None
+    if blocked is None:
+        route = "a read"
+        return {"ok": True, "operation": route, "status": 200}
+    detail = verifymod.credential_not_seen(headers, blocked["body"]) or ""
+    age = verifymod.credential_age(headers) or ""
+    tail = (" " + detail if detail else "") + (" " + age if age else "")
+    return {"ok": False, "operation": blocked["operation"], "status": blocked["status"],
+            "error": (f"The credential was rejected: {blocked['status']} on "
+                      f"{blocked['operation']} — {blocked['body'][:120]}.{tail}")}
+
+
 @app.post("/api/env-login")
 def env_login():
     """Prove an environment's credentials before running anything against it."""
@@ -1652,6 +1681,15 @@ def env_login():
                          f"which writes the gitignored .env.",
             })
         headers, note = envmod.authenticate(env)
+        # An environment whose credential is a static header never "logs in",
+        # so reporting success here proved nothing: it said ok while the very
+        # next run failed on the same credential. Prove it with a real call.
+        proof = probe_credential(headers, envmod.resolve(env.get("base_url", ""), []))
+        if proof and not proof["ok"]:
+            return jsonify({"ok": False, "error": proof["error"],
+                            "probed": proof["operation"], "status": proof["status"]})
+        if proof:
+            note = f"{note} — and {proof['operation']} answered {proof['status']}"
     except SystemExit as exc:
         return jsonify({"ok": False, "error": str(exc)})
     except Exception as exc:
