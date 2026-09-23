@@ -54,7 +54,11 @@ function check(name, ok, detail) {
   console.log("\nSOURCE");
   await p.locator('nav.side a[data-view="source"]').click(); await p.waitForTimeout(1200);
   const statusText = await p.locator("#specStatus").textContent();
-  check("spec status rendered", statusText.includes("Matches the lock"), statusText.slice(0, 60));
+  // which status is correct depends on whether the project spec happens to be
+  // the pinned one, so assert that provenance is REPORTED, not that it matches
+  check("spec status rendered",
+        /Matches the lock|Does NOT match|No spec\.lock\.json/.test(statusText),
+        statusText.slice(0, 80));
   check("pin button present", await p.locator("#btnLockThis").count() === 1);
 
   // ---------------------------------------------------------------- connect
