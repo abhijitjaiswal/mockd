@@ -159,9 +159,9 @@ component schemas) that split is clean:
 
 | | operations | success response | request body | failure responses |
 |---|---|---|---|---|
-| **fully documented** — `application-questions`, `recruitment-settings` | **30** | `$ref` to a `StandardResponseModel_*` + a hand-written `example` | schema | 401/403/404/409/500, each with an example |
+| **fully documented** — the tags whose routes declare a response model | **30** | `$ref` to a `StandardResponseModel_*` + a hand-written `example` | schema | 401/403/404/409/500, each with an example |
 | **partial** | **1** | an `example` but no schema — a person can read it, a test cannot check against it | schema | documented |
-| **no response shape** — user, role, address, device, integration, requisition, auth, metadata, enums | **65** | `"schema": {}` — the route has no `response_model` | schema (where a body is taken) | only 422 |
+| **no response shape** — every other tag | **65** | `"schema": {}` — the route has no `response_model` | schema (where a body is taken) | only 422 |
 
 Per dimension, across all 96: success response declared for 31 — but only **30
 by schema**; the one that carries an `example` and no schema is readable by a
@@ -233,7 +233,7 @@ Read-only by default. For each operation it checks that the status came back
 status**, that the content type matches, and how long it took.
 
 It fills path params intelligently: collection endpoints run first and real ids
-are harvested from their responses, so `/user/read/{user_id}` is exercised with
+are harvested from their responses, so `/account/read/{account_id}` is exercised with
 an id that exists rather than a random uuid that 404s.
 
 ```

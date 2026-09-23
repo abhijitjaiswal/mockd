@@ -843,7 +843,7 @@ _VERB_SUFFIX = re.compile(
 class StateStore:
     """Keeps created objects in memory so create -> read -> update -> delete
     flows work. Handles both REST shapes (/users, /users/{id}) and the
-    verb-in-path shape this spec uses (/user/create, /user/read/{id})."""
+    verb-in-path shape this spec uses (/account/create, /account/read/{id})."""
 
     def __init__(self):
         self.data = {}

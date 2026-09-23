@@ -19,7 +19,7 @@ operations in apis.json), it records the shape it actually observed, so the
 gap between doc and reality becomes a list someone can work through.
 
 It fills path params intelligently: list endpoints run first and real ids are
-harvested from their responses, so `/user/read/{user_id}` is exercised with an
+harvested from their responses, so `/account/read/{account_id}` is exercised with an
 id that exists rather than a random uuid that 404s.
 
     # read-only sweep against a real environment
@@ -201,8 +201,8 @@ class IdPool:
     @classmethod
     def _resource(cls, path):
         """The collection a path belongs to, precise enough to tell
-        /metadata/states from /metadata/cities, loose enough to tie
-        /user/list to /user/read/{id}."""
+        /reference/states from /reference/cities, loose enough to tie
+        /account/list to /account/read/{id}."""
         literal = [p for p in path.strip("/").split("/") if not p.startswith("{")]
         key = "/" + "/".join(literal)
         return cls._VERB.sub("", key) or "/"

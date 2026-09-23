@@ -37,7 +37,7 @@ second     = next((r["path"] for r in spec.routes
                    and r["path"] != collection), collection)
 
 def prefix(path):
-    """'/api/v1/user/read/{user_id}' -> '/api/v1/user/read/' so an id can be
+    """'/api/v1/account/read/{account_id}' -> '/api/v1/account/read/' so an id can be
     appended; empty when the parameter is not the last segment."""
     return path.split("{", 1)[0] if path and path.rstrip("/").endswith("}") else ""
 

@@ -36,20 +36,53 @@ const ck=(n,ok,d)=>{ok?pass++:fail++;console.log(`  ${ok?"ok  ":"FAIL"}  ${n}${o
 
   // untick one and run; it must be reported as deselected
   await p.locator("#opsAll").click(); await p.waitForTimeout(300);
-  await p.locator("#opsFilter").fill("user/list"); await p.waitForTimeout(400);
+  // One route decides both the operation to untick and the group to narrow to.
+  // Deriving them separately let them disagree, so the unticked operation fell
+  // outside the filtered run and never appeared as SKIP.
+  const chosen = await p.evaluate(async () => {
+    const all = (await (await fetch("/api/routes")).json());
+    const routes = all.routes || all;
+    // keep the leading slash: without it startsWith() never matches a path
+    const group = (path) => {
+      const parts = path.split("/").filter(Boolean);
+      return "/" + parts.slice(0, parts.length - 1).join("/") + "/";
+    };
+    // the run has to contain BOTH a streaming operation and one we untick, so
+    // start from the stream and find a sibling to deselect
+    const streamy = routes.find((x) => /stream|sse|watch|subscribe|events/i.test(x.path));
+    if (streamy) {
+      const g = group(streamy.path).replace(/[^/]+\/$/, "");
+      const sibling = routes.find((x) => x.method === "GET" && !/\{/.test(x.path)
+        && x.path.startsWith(g) && x.path !== streamy.path);
+      // filter by the sibling's FULL path: a bare last segment ("list")
+      // matches many operations, and the first one unticked can sit outside
+      // the group this run is narrowed to
+      if (sibling) return { term: sibling.path, group: g };
+    }
+    const r = routes.find((x) => x.method === "GET" && !/\{/.test(x.path));
+    if (!r) return null;
+    return { term: r.path, group: group(r.path), noStream: true };
+  });
+  const term = chosen ? chosen.term : "";
+  await p.locator("#opsFilter").fill(term); await p.waitForTimeout(400);
   await p.locator("#opsPick input").first().uncheck(); await p.waitForTimeout(200);
   await p.locator("#opsFilter").fill(""); await p.waitForTimeout(300);
   ck("unticking reduces the count",
-     !(await p.locator("#opsCount").textContent()).startsWith("96 of"),
+     /^(\d+) of \1$/.test((await p.locator("#opsCount").textContent()).trim()) === false,
      await p.locator("#opsCount").textContent());
   ck("skip-streaming is on by default", await p.locator("#liveSkipStream").isChecked());
 
   await p.locator("#liveUrl").fill("http://127.0.0.1:4010");
-  await p.locator("#liveOnly").fill("user/");
+  // the same route's group, so the operation unticked above is inside this run
+  await p.locator("#liveOnly").fill(chosen ? chosen.group : "");
   await p.locator("#btnVerifyLive").click(); await p.waitForTimeout(8000);
   const out = await p.locator("#liveRows").textContent();
   ck("deselected operation reported as SKIP", /deselected/.test(out));
-  ck("streaming operation skipped", /looks like a stream/.test(out));
+  if (!chosen || !chosen.noStream) {
+    ck("streaming operation skipped", /looks like a stream/.test(out));
+  } else {
+    console.log("  --    this spec has no streaming operation to skip");
+  }
   await p.locator("#liveOutCard").screenshot({path:path.join(__dirname,"ui","picker.png")});
 
   console.log("\n"+"=".repeat(50));
