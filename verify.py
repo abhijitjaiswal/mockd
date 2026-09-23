@@ -451,18 +451,59 @@ def worst(levels):
     return OK
 
 
-AUTH_HINT = """\
-Nothing was authenticated, so every finding below is the same finding.
+# Naming a login route as a literal here was a bug twice over: it described one
+# API, and when that literal was later made generic it started pointing at a
+# path that exists nowhere. The spec being checked already says what its login
+# routes are, so read them from it.
+LOGIN_WORDS = ("login", "signin", "sign-in", "token", "session", "authenticate")
 
-  * Check the credential first, not the contract. A token that is expired, or
-    sent the way this API does not read, produces exactly this shape of report.
-  * This spec's own login endpoint (POST /api/v1/auth/session) replies with
-    Set-Cookie, and the API reads a COOKIE — an `Authorization: Bearer ...`
-    header is ignored by a server like that, and it will still say the token is
-    missing. Send `Cookie: <name>=<value>`, or use an environment with
-    `auth.mode: "login"` so the run logs in and keeps the cookie jar itself.
-  * `python environments.py login <env>` proves the credential on its own,
-    before you spend a sweep on it."""
+
+def login_routes(spec):
+    """Operations in this document that look like a way to obtain a credential."""
+    found = []
+    for route in spec.routes:
+        lowered = route["path"].lower()
+        if any(word in lowered for word in LOGIN_WORDS) and route["method"] != "GET":
+            found.append(route["key"])
+    return found
+
+
+def credential_age(headers):
+    """What the credential being sent says about its own expiry, if anything."""
+    try:
+        import environments as envmod
+    except Exception:
+        return None
+    for name in ("Cookie", "cookie", "Authorization", "authorization"):
+        value = (headers or {}).get(name)
+        if not value:
+            continue
+        state, sentence = envmod.credential_expiry(value)
+        if state in ("expired", "valid"):
+            return sentence
+    return None
+
+
+def auth_hint(spec):
+    routes = login_routes(spec)
+    if routes:
+        named = ", ".join(routes[:3])
+        first = (f"  * This document's own login route ({named}) is how to obtain a\n"
+                 f"    credential. If it replies with Set-Cookie then the API reads a\n"
+                 f"    COOKIE, and an `Authorization: Bearer ...` header is ignored by a\n"
+                 f"    server like that — it will still say the token is missing.\n")
+    else:
+        first = ("  * This document declares no login route, so the credential has to come\n"
+                 "    from somewhere else — ask whoever owns the API how it is issued.\n")
+    return (
+        "Nothing was authenticated, so every finding below is the same finding.\n\n"
+        "  * Check the credential first, not the contract. A token that is expired, or\n"
+        "    sent the way this API does not read, produces exactly this shape of report.\n"
+        + first +
+        "    Send `Cookie: <name>=<value>`, or use an environment with\n"
+        "    `auth.mode: \"login\"` so the run logs in and keeps the cookie jar itself.\n"
+        "  * `python environments.py login <env>` proves the credential on its own,\n"
+        "    before you spend a sweep on it.")
 
 
 def auth_probe(spec, base_url, headers, timeout):
@@ -605,7 +646,13 @@ def run(spec, base_url, headers, args):
     if blocked:
         print(f"\nAUTHENTICATION FAILED — {blocked['status']} on {blocked['operation']}")
         print(f"  the server said: {blocked['body']}")
-        print(AUTH_HINT)
+        # "Invalid token" says the server refused it, not why. If the credential
+        # is a JWT it carries its own expiry, and reading that locally turns a
+        # guess into an answer.
+        verdict = credential_age(headers)
+        if verdict:
+            print(f"  {verdict}")
+        print(auth_hint(spec))
         if not args.ignore_auth_probe:
             print("\nStopping before the sweep. Re-run with --ignore-auth-probe to check "
                   "anyway.")

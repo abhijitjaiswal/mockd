@@ -30,6 +30,7 @@ import argparse
 import json
 import os
 import re
+import time
 import sys
 import urllib.error
 import urllib.parse
@@ -109,6 +110,55 @@ def _merge(base, extra):
         else:
             out[key] = value
     return out
+
+
+# ---------------------------------------------------------------------------
+# What a credential says about itself
+# ---------------------------------------------------------------------------
+#
+# "Invalid token" tells you the server refused it, not why. A JWT carries its
+# own expiry, so read it and say plainly whether the credential is simply old.
+# Decoding is local and signature-free: the payload is base64, and nothing is
+# sent anywhere. The token itself is never returned or logged — only what it
+# claims about time.
+
+def credential_expiry(value):
+    """(state, sentence) for a credential. state is 'expired', 'valid',
+    'undated' or 'opaque'."""
+    import base64
+    import json as _json
+
+    raw = str(value or "").strip()
+    raw = raw.split(";")[0].strip()                 # "access_token=x; Path=/" -> "access_token=x"
+    if raw.lower().startswith("bearer "):
+        raw = raw[7:].strip()
+    token = raw.split("=", 1)[1].strip() if "=" in raw and "." in raw.split("=", 1)[1] else raw
+    parts = token.split(".")
+    if len(parts) < 2:
+        return "opaque", "This credential is not a JWT, so it carries no readable expiry."
+    try:
+        padded = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = _json.loads(base64.urlsafe_b64decode(padded))
+    except Exception:
+        return "opaque", "This credential is not a readable JWT."
+    if not isinstance(claims, dict) or claims.get("exp") is None:
+        return "undated", "This token declares no expiry."
+
+    exp = float(claims["exp"])
+    now = time.time()
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(exp))
+    if exp < now:
+        hours = (now - exp) / 3600
+        ago = (f"{hours:.0f} hour(s) ago" if hours < 48
+               else f"{hours / 24:.0f} day(s) ago")
+        return "expired", (f"This token EXPIRED at {when} ({ago}). That is why the "
+                           f"server rejects it — log in again for a fresh one.")
+    hours = (exp - now) / 3600
+    left = f"{hours:.0f} hour(s)" if hours < 48 else f"{hours / 24:.0f} day(s)"
+    return "valid", (f"This token is still valid until {when} ({left} left), so its age "
+                     f"is not the problem — the server rejected the token itself. That "
+                     f"usually means it was issued by a different deployment, or the "
+                     f"signing secret changed (a restart can do that).")
 
 
 def load(path=None):
