@@ -2187,7 +2187,9 @@ $("envDlgTest").addEventListener("click", async () => {
     ? `<p class="hint" style="color:var(--ok)">${esc(data.note)} — `
       + `${esc(Object.entries(data.headers || {}).map(([k, v]) => k + ": " + v).join("  ")
               || "no headers needed")}</p>`
-    : `<p class="hint" style="color:var(--err)">${esc(data.error)}</p>`;
+    : `<p class="hint" style="color:var(--err)">${esc(data.error)}${
+      (data.unresolved || []).length
+        ? " Fill in the field(s) above, then press Save." : ""}</p>`;
 });
 
 $("envDlgCancel").addEventListener("click", () => $("envDlg").close());
@@ -2199,7 +2201,13 @@ $("btnEnvLogin").addEventListener("click", async () => {
   const { data } = await api("/api/env-login",
     { method: "POST", body: JSON.stringify({ name }) });
   $("btnEnvLogin").disabled = false;
-  if (!data.ok) { banner("err", data.error); return; }
+  if (!data.ok) {
+    banner("err", data.error);
+    // A message telling you to edit a file is a dead end when the button that
+    // writes that file is on this very page — so open it.
+    if ((data.unresolved || []).length) configureEnv(name);
+    return;
+  }
   const shown = Object.entries(data.headers || {})
     .map(([k, v]) => `${k}: ${v}`).join("   ");
   banner("ok", `${name}: ${data.note}. ${shown || "no headers needed"}`);

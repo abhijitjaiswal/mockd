@@ -1634,6 +1634,23 @@ def env_login():
     try:
         import environments as envmod
         env = envmod.get(name)
+        # Every missing value at once, not the first one the resolver trips on:
+        # being told about DEV_USERNAME, fixing it, and then being told about
+        # DEV_PASSWORD is three round trips for one piece of information.
+        # Only what logging in actually needs. An environment's `data` block is
+        # row ids for tests; demanding those before proving a credential turns
+        # one question into five.
+        missing = []
+        envmod.resolve({"base_url": env.get("base_url"), "auth": env.get("auth"),
+                        "headers": env.get("headers")}, missing)
+        if missing:
+            names = sorted(set(missing))
+            return jsonify({
+                "ok": False, "unresolved": names, "environment": name,
+                "error": f"{name} needs {', '.join(names)}. "
+                         f"Set {'them' if len(names) > 1 else 'it'} with Configure, "
+                         f"which writes the gitignored .env.",
+            })
         headers, note = envmod.authenticate(env)
     except SystemExit as exc:
         return jsonify({"ok": False, "error": str(exc)})
