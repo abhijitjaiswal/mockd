@@ -7,6 +7,7 @@
  * placeholders — and the values go to the gitignored .env.
  */
 const { chromium } = require("playwright");
+const EP = require("./endpoints");
 
 let pass = 0, fail = 0; const errs = [];
 const check = (n, ok, d) => { ok ? pass++ : fail++;
@@ -56,15 +57,16 @@ const check = (n, ok, d) => { ok ? pass++ : fail++;
         JSON.stringify(written).slice(0, 120));
 
   // --- the point of read-only ---
-  const refused = await p.evaluate(async () => {
+  // EP lives in node; the callback runs in the browser, so pass it across
+  const refused = await p.evaluate(async (collection) => {
     const steps = [{ role: "target", name: "create something",
-      request: { method: "POST", path: "/api/v1/recruitment-settings/positions/departments",
+      request: { method: "POST", path: collection,
                  body: { title: "should never happen" } },
       assertions: [{ type: "status", in: [200, 201] }] }];
     return await (await fetch("/api/tests/chain", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ target: "prod", steps, upto: 0 }) })).json();
-  });
+  }, EP.COLLECTION);
   const detail = JSON.stringify(refused);
   check("a write against production is refused", /read-only/.test(detail),
         detail.slice(0, 150));

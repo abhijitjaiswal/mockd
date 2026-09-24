@@ -112,18 +112,18 @@ def group_selection():
 def group_binding():
     import tests as t
 
-    dept = "/api/v1/recruitment-settings/positions/departments"
+    dept = "/api/v1/widgets"
     check("name: an id takes the resource with it", t.binding_name("data.id", dept),
-          "departmentId")
-    check("name: a title too", t.binding_name("data.title", dept), "departmentTitle")
+          "widgetId")
+    check("name: a title too", t.binding_name("data.title", dept), "widgetTitle")
     check("name: an already-qualified field is not doubled",
-          t.binding_name("data.department_id", dept), "departmentId")
+          t.binding_name("data.widget_id", dept), "widgetId")
     check("name: a list item still names the resource",
           t.binding_name("data.items[0].id", "/api/v1/user/list"), "userId")
     check("name: something unremarkable keeps its own name",
           t.binding_name("total", "/api/v1/user/list"), "total")
     check("name: a taken name is never silently reused",
-          t.binding_name("data.id", dept, taken={"departmentId"}), "departmentId2")
+          t.binding_name("data.id", dept, taken={"widgetId"}), "widgetId2")
 
     body = {"message": "ok", "data": {"id": "a-1", "title": "Eng", "count": 2,
                                       "nested": {"owner_id": "u-9"}, "flag": True,

@@ -70,8 +70,8 @@ const check = (n, ok, d) => { ok ? pass++ : fail++;
   check("the story panel opens", await p.locator("#genStoryRow").isVisible());
   check("and hides the CI picker", await p.locator("#genPipeRow").isHidden());
   await p.locator("#genStory").fill(
-    "As a recruiter I want to create a department and add approval levels to it, "
-    + "so that requisitions raised under it follow the right approval chain.");
+    "As an administrator I want to create a team and add approval levels to it, "
+    + "so that requests raised under it follow the right approval chain.");
   await p.locator("#genStoryGo").click(); await p.waitForTimeout(2500);
   const brief = await p.locator("#genOut").textContent();
   check("the brief carries the story", /approval chain/.test(brief));

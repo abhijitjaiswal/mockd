@@ -94,7 +94,11 @@ def _string_by_name(field: str, rng: random.Random):
             return rng.choice(["India", "United States", "Germany", "Singapore"])
         if "state" in f:
             return rng.choice(["Karnataka", "Maharashtra", "Telangana", "Tamil Nadu"])
-        return rng.choice(_FIRST) + " " + rng.choice(_LAST) if "candidate" in f or "user" in f \
+        # a field naming a PERSON wants a person's name; anything else wants words
+        person = ("person", "user", "customer", "contact", "owner", "author",
+                  "member", "employee", "first", "last", "full")
+        return rng.choice(_FIRST) + " " + rng.choice(_LAST) \
+            if any(w in f for w in person) \
             else rng.choice(_WORDS).capitalize() + " " + rng.choice(_WORDS).capitalize()
     if "city" in words:
         return rng.choice(["Bengaluru", "Pune", "Mumbai", "Hyderabad", "Chennai"])

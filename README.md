@@ -201,8 +201,8 @@ GET /api/v1/quote/list  ->  404          # not in the spec yet
                                           # backend adds it to apis.json / redeploys
 GET /api/v1/quote/list  ->  200  X-Mock-Source: synthesized
 {"status_code":200,"message":"List Offers successful",
- "data":{"items":[{"id":"...","candidate_name":"Aarav Sharma","ctc":2400000,
-                   "status":"Draft","joining_date":"2026-03-13", ...}],
+ "data":{"items":[{"id":"...","customer_name":"Aarav Sharma","amount":2400000,
+                   "status":"Draft","valid_until":"2026-03-13", ...}],
          "total":2,"page":1,"page_size":10}}
 ```
 

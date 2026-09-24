@@ -210,7 +210,7 @@ def synthesise_success(route, spec, rng=None, path_params=None):
                 "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
                 "username": "priya.sharma", "email": "priya.sharma@example.com",
                 "first_name": "Priya", "last_name": "Sharma",
-                "role": {"id": "9c1e6b8a-2d44-4f31-8c77-1f2b9de0a512", "title": "Recruiter"},
+                "role": {"id": "9c1e6b8a-2d44-4f31-8c77-1f2b9de0a512", "title": "Administrator"},
                 "status": "Active", "is_active": True})
         if "callback" in path:
             return envelope("Authentication callback processed", {"redirect_url": "/dashboard"})

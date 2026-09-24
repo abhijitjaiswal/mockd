@@ -1272,7 +1272,7 @@ def _id_shaped(key):
 
 
 def _resource_from_path(request_path):
-    """'/api/v1/recruitment-settings/positions/departments' -> 'department'."""
+    """'/api/v1/catalog/positions/widgets' -> 'widget'."""
     parts = [p for p in str(request_path or "").split("/")
              if p and not p.startswith("{") and p.lower() not in NOISE]
     if not parts:

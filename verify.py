@@ -759,7 +759,14 @@ def summarise(spec, results, args):
     ran = [r for r in results if r["level"] != SKIP]
     skipped = [r for r in results if r["level"] == SKIP]
     verified = [r for r in ran if r["level"] == OK]
-    failed = [r for r in ran if r["level"] == ERROR]
+    # A server that never answered is not a contract breach. Keeping the two
+    # apart matters most in CI, where the report is the only thing a human
+    # reads: "49 failed — the body breaks its own schema" sends someone
+    # hunting a spec regression when the truth is that nothing was listening.
+    unreachable = [r for r in ran
+                   if any(c["check"] == "reachable" and c["level"] == ERROR
+                          for c in r["checks"])]
+    failed = [r for r in ran if r["level"] == ERROR and r not in unreachable]
     unverifiable = [r for r in ran
                     if any(c["check"] == "schema_declared" and c["level"] == WARN
                            for c in r["checks"])]
@@ -785,6 +792,15 @@ def summarise(spec, results, args):
               f"(see the report)")
     print(f"     {len(failed):3d} failed        undocumented status, or the body breaks "
           f"its own schema")
+    if unreachable:
+        print(f"     {len(unreachable):3d} unreachable   no response at all — an environment "
+              f"problem, not a contract one")
+    if unreachable and not verified and not failed:
+        first = (unreachable[0]["checks"][0].get("detail") or "no response")
+        print(f"\n  Nothing at {args.base_url} answered. This says nothing about the "
+              f"contract —\n  start the server, or point --base-url elsewhere. "
+              f"First error:\n    {first}")
+
     if skipped:
         why = ("POST/PUT/PATCH/DELETE — pass --allow-writes to include them "
                "(safe here: the mock's store is in memory)" if args.target == "mock"

@@ -12,10 +12,9 @@ let pass = 0, fail = 0; const errs = [];
 const check = (n, ok, d) => { ok ? pass++ : fail++;
   console.log(`  ${ok ? "ok  " : "FAIL"}  ${n}${ok || !d ? "" : "  — " + d}`); };
 
-const COLLECTION = process.env.MOCKD_COLLECTION
-  || "/api/v1/recruitment-settings/positions/departments";
-const NESTED = process.env.MOCKD_NESTED
-  || "/api/v1/recruitment-settings/positions/departments/{{departmentId}}/levels";
+const EP = require("./endpoints");
+const COLLECTION = EP.COLLECTION;
+const NESTED = EP.NESTED;
 
 (async () => {
   const b = await chromium.launch();
