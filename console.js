@@ -28,7 +28,7 @@ function showView(name) {
     a.classList.toggle("on", a.dataset.view === name));
   location.hash = name;
   window.scrollTo(0, 0);
-  if (name === "tests") loadTests();
+  if (name === "tests") { loadTests(); fillTestSelectors(); fillTypeList(); }
   if (name === "source") loadProjectSpec();
   if (name === "explore" && !ROUTES.length && RUNNING) loadRoutes();
   if (name === "authoring" && !GUIDE) { loadRules(); loadGuide(); }
@@ -421,8 +421,12 @@ function fillExploreTargets() {
   const opts = [`<option value="mock">mock — ${esc(TARGET_BASE.mock || "not running")}</option>`]
     .concat((ENVS || []).filter((e) => e.name !== "mock").map((e) => {
       TARGET_BASE[e.name] = e.base_url;
-      return `<option value="${esc(e.name)}"${e.ready ? "" : " disabled"}>`
-        + `${esc(e.name)} — ${esc(e.base_url || "?")}${e.ready ? "" : "  (unset vars)"}</option>`;
+      // Not disabled: an environment missing its values is one you are about to
+      // fill in, and a dead option gives you nowhere to do that. Selecting it
+      // opens Configure instead.
+      return `<option value="${esc(e.name)}">`
+        + `${esc(e.name)} — ${esc(e.base_url || "needs values")}`
+        + `${e.ready ? "" : "  — needs " + (e.unresolved || []).length + " value(s)"}</option>`;
     }));
   const keep = $("exploreTarget").value;
   $("exploreTarget").innerHTML = opts.join("");
@@ -491,6 +495,14 @@ async function tryTest(host, test, button, ctx = {}) {
 }
 
 const A_TYPES = ["status", "schema", "jsonpath", "header", "responseTime", "body_contains"];
+/* Which suites are open, and which page of each is showing. Kept outside the
+   render so opening a suite survives a refresh — a list that snaps shut every
+   time the tests reload is a list you stop using. */
+const TREE_OPEN = {};
+const TREE_PAGE = {};
+const COLLAPSE_OVER = 6;        // bigger than this and it starts closed
+const PAGE_SIZE = 25;
+
 const A_OPS = ["equals", "not_equals", "exists", "not_exists", "is_null", "not_null",
                "type", "contains", "not_contains", "matches", "in", "gt", "gte", "lt",
                "lte", "length", "length_gte", "empty", "not_empty"];
@@ -505,6 +517,22 @@ const A_TYPE_HELP = {
 };
 
 /** Render an editable list of assertions into `host`; read them back with readAssertions. */
+/* Every type an assertion may name — JSON's own, the formats we can check, and
+   any this project already uses. Refreshed with the rest of the Tests view, so
+   a type that appears in a saved test appears here too. */
+async function fillTypeList() {
+  const { data } = await api("/api/tests/taxonomy");
+  const types = (data && data.types) || {};
+  const groups = [["JSON types", types.json || []],
+                  ["formats", types.formats || []],
+                  ["used in this project", types.in_use || []]];
+  $("typeList").innerHTML = groups
+    .filter(([, list]) => list.length)
+    .map(([label, list]) => list
+      .map((x) => `<option value="${esc(x)}" label="${esc(label)}">`).join(""))
+    .join("");
+}
+
 function assertionEditor(host, assertions) {
   host.innerHTML = `<div class="alist"></div>
     <div class="btnrow" style="margin-top:8px">
@@ -532,7 +560,12 @@ function addRow(list, a) {
       ${A_OPS.map((o) => `<option value="${o}"${o === (a.op || "equals") ? " selected" : ""}>`
         + `${o}</option>`).join("")}
     </select>
-    <input class="a-value" placeholder="value">
+    <input class="a-value" placeholder="value" list="typeList">
+    <select class="a-where" title="which environments this assertion applies to">
+      <option value="">everywhere</option>
+      <optgroup label="only on"></optgroup>
+      <optgroup label="except on"></optgroup>
+    </select>
     <button type="button" class="sm a-del danger" title="remove">remove</button>`;
   list.appendChild(row);
 
@@ -540,6 +573,21 @@ function addRow(list, a) {
   const path = row.querySelector(".a-path");
   const op = row.querySelector(".a-op");
   const val = row.querySelector(".a-value");
+  const where = row.querySelector(".a-where");
+
+  // Most assertions hold everywhere and say nothing. The exceptions — a count
+  // only true on a seeded server, a field only production returns — are worth
+  // naming, and naming them here beats copying the whole test per environment.
+  const named = (ENVS || []).map((e) => e.name);
+  where.querySelectorAll("optgroup")[0].innerHTML = named
+    .map((n) => `<option value="only:${esc(n)}">only on ${esc(n)}</option>`).join("");
+  where.querySelectorAll("optgroup")[1].innerHTML = named
+    .map((n) => `<option value="except:${esc(n)}">except on ${esc(n)}</option>`).join("");
+  if (a.only_on) {
+    where.value = `only:${[].concat(a.only_on)[0]}`;
+  } else if (a.except_on) {
+    where.value = `except:${[].concat(a.except_on)[0]}`;
+  }
 
   // seed the fields from the assertion we were given
   if (a.type === "status") {
@@ -558,6 +606,11 @@ function addRow(list, a) {
 
   const sync = () => {
     const t = type.value;
+    // the value field means something different for `type`: it names one of a
+    // known set, so offer the set rather than leave people guessing
+    const isType = t === "jsonpath" && op.value === "type";
+    val.setAttribute("list", isType ? "typeList" : "");
+    val.placeholder = isType ? "string, integer, uuid, date-time…" : "value";
     path.hidden = !["jsonpath", "header"].includes(t);
     op.hidden = !["jsonpath", "header", "responseTime"].includes(t);
     val.hidden = t === "schema" || (op.hidden === false && NO_VALUE.has(op.value));
@@ -582,17 +635,25 @@ function parseValue(text) {
 function readAssertions(host) {
   return [...host.querySelectorAll(".arow2")].map((row) => {
     const t = row.querySelector(".a-type").value;
+    const whereSel = row.querySelector(".a-where");
+    const [mode, envName] = (whereSel ? whereSel.value : "").split(":");
+    const scope = envName
+      ? (mode === "only" ? { only_on: [envName] } : { except_on: [envName] })
+      : {};
     const path = row.querySelector(".a-path").value.trim();
     const op = row.querySelector(".a-op").value;
     const value = parseValue(row.querySelector(".a-value").value);
-    if (t === "schema") return { type: "schema" };
+    if (t === "schema") return { type: "schema", ...scope };
     if (t === "status") return Array.isArray(value)
-      ? { type: "status", in: value } : { type: "status", equals: value ?? 200 };
-    if (t === "responseTime") return { type: "responseTime", op, value: value ?? 2000 };
+      ? { type: "status", in: value, ...scope }
+      : { type: "status", equals: value ?? 200, ...scope };
+    if (t === "responseTime")
+      return { type: "responseTime", op, value: value ?? 2000, ...scope };
     if (t === "header") return { type: "header", name: path, op,
-                                 ...(NO_VALUE.has(op) ? {} : { value }) };
-    if (t === "body_contains") return { type: "body_contains", value };
-    return { type: "jsonpath", path, op, ...(NO_VALUE.has(op) ? {} : { value }) };
+                                 ...(NO_VALUE.has(op) ? {} : { value }), ...scope };
+    if (t === "body_contains") return { type: "body_contains", value, ...scope };
+    return { type: "jsonpath", path, op, ...(NO_VALUE.has(op) ? {} : { value }),
+             ...scope };
   }).filter((a) => a.type !== "jsonpath" || a.path);
 }
 
@@ -779,17 +840,40 @@ async function loadTests() {
   const OUT = (h) => {
     const k = (h && h.last_outcome) || "never";
     if (k === "never") return '<span class="outcome never">never run</span>';
-    // an outcome is meaningless without the environment it came from
-    const env = (h && (h.last_env || h.last_base_url)) || "?";
-    const title = `last run ${h.last_run || ""} against ${h.last_base_url || ""}`;
-    return `<span class="outcome ${esc(k)}" title="${esc(title)}">${esc(k)}</span>`
-         + `<span class="tag" title="${esc(title)}">on ${esc(env)}</span>`;
+    // One badge per environment. A single "last outcome" meant running against
+    // dev erased the fact that it passes on the mock — and green-here-red-there
+    // is the most useful thing a test can tell you.
+    const byEnv = (h && h.by_env) || {};
+    const names = Object.keys(byEnv);
+    if (!names.length) {
+      const env = (h && (h.last_env || h.last_base_url)) || "?";
+      return `<span class="outcome ${esc(k)}">${esc(k)}</span>`
+           + `<span class="tag">on ${esc(env)}</span>`;
+    }
+    const differs = new Set(names.map((n) => byEnv[n].last_outcome)).size > 1;
+    return names.sort().map((name) => {
+      const seen = byEnv[name];
+      const title = `${seen.passes}/${seen.runs} passed · last ${seen.last_run || "?"}`;
+      return `<span class="outcome ${esc(seen.last_outcome)}" title="${esc(title)}"`
+           + ` style="margin-right:3px">${esc(name)} ${esc(seen.last_outcome)}</span>`;
+    }).join("")
+      + (differs ? '<span class="tag" style="color:var(--warn)" title="the test and the '
+                 + 'spec are the same in both — look at the server and its data"'
+                 + '>differs by environment</span>' : "");
   };
 
   const acts = (suite, id, stage, h) => {
     const canPromote = stage === "draft";
     const proven = h && h.last_outcome === "pass";
     return `<span class="tacts">
+      <button class="sm tact" data-act="open" data-suite="${esc(suite)}"
+              data-stage="${esc(stage)}" data-id="${esc(id)}"
+              title="open it in the workbench, where its steps can be run and rewired"
+        >open</button>
+      <button class="sm tact" data-act="run" data-suite="${esc(suite)}"
+              data-stage="${esc(stage)}" data-id="${esc(id)}"
+              title="run just this one, against the environment chosen on the left"
+        >run</button>
       <button class="sm tact" data-act="edit" data-suite="${esc(suite)}"
               data-stage="${esc(stage)}" data-id="${esc(id)}">edit</button>
       ${canPromote ? `<button class="sm tact" data-act="promote" data-suite="${esc(suite)}"
@@ -849,19 +933,64 @@ async function loadTests() {
   const order = { shared: 0, draft: 1 };
   suites.sort((a, b) => (order[a.stage] - order[b.stage]) || a.name.localeCompare(b.name));
 
-  $("testTree").innerHTML = suites.map((s) => `
+  // A suite is collapsed by default once it is big enough to push everything
+  // else off the screen, and only a page of it is drawn at a time — a hundred
+  // tests rendered at once is a list nobody can read and a page that stutters.
+  $("testTree").innerHTML = suites.map((s) => {
+    const items = [...s.cases.map((c) => ({ kind: "case", item: c })),
+                   ...s.scenarios.map((sc) => ({ kind: "scenario", item: sc }))];
+    const key = `${s.name}|${s.stage}`;
+    const open = TREE_OPEN[key] !== undefined
+      ? TREE_OPEN[key] : items.length <= COLLAPSE_OVER;
+    const page = TREE_PAGE[key] || 0;
+    const pages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
+    const slice = items.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
+    return `
     <div class="suite">
-      <header>
+      <header class="tfold" data-fold="${esc(key)}" style="cursor:pointer">
+        <span class="fold">${open ? "▾" : "▸"}</span>
         <span class="name">${esc(s.name)}</span>
         <span class="stage ${esc(s.stage)}">${esc(s.stage)}</span>
         <span class="grow"></span>
-        <span class="tag">${s.cases.length + s.scenarios.length} test(s)</span>
+        <span class="tag">${items.length} test(s)</span>
+        <button class="sm tact" data-act="run-suite" data-suite="${esc(s.name)}"
+                data-stage="${esc(s.stage)}" data-id=""
+                title="run this whole section against the environment chosen on the left"
+          >run section</button>
       </header>
-      ${s.cases.map((c) => caseBlock(s, c)).join("")}
-      ${s.scenarios.map((sc) => scenarioBlock(s, sc)).join("")}
-      ${!s.cases.length && !s.scenarios.length
-        ? '<div class="empty">empty suite</div>' : ""}
-    </div>`).join("");
+      ${open ? `
+        ${slice.map(({ kind, item }) => kind === "case"
+            ? caseBlock(s, item) : scenarioBlock(s, item)).join("")}
+        ${!items.length ? '<div class="empty">empty suite</div>' : ""}
+        ${pages > 1 ? `
+          <div class="tpage">
+            <button class="sm" data-page="${esc(key)}|${page - 1}"
+              ${page === 0 ? "disabled" : ""}>← previous</button>
+            <span class="hint">showing ${page * PAGE_SIZE + 1}–${
+              Math.min((page + 1) * PAGE_SIZE, items.length)} of ${items.length}</span>
+            <button class="sm" data-page="${esc(key)}|${page + 1}"
+              ${page + 1 >= pages ? "disabled" : ""}>next →</button>
+          </div>` : ""}
+      ` : ""}
+    </div>`;
+  }).join("");
+
+  $("testTree").querySelectorAll("[data-fold]").forEach((h) =>
+    h.addEventListener("click", (ev) => {
+      if (ev.target.closest(".tact")) return;        // a button, not the header
+      const key = h.dataset.fold;
+      const items = suites.find((x) => `${x.name}|${x.stage}` === key);
+      const count = items ? items.cases.length + items.scenarios.length : 0;
+      const now = TREE_OPEN[key] !== undefined ? TREE_OPEN[key] : count <= COLLAPSE_OVER;
+      TREE_OPEN[key] = !now;
+      loadTests();
+    }));
+  $("testTree").querySelectorAll("[data-page]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const [name, stage, page] = b.dataset.page.split("|");
+      TREE_PAGE[`${name}|${stage}`] = Math.max(0, +page);
+      loadTests();
+    }));
 
   $("testTree").querySelectorAll(".tact").forEach((b) =>
     b.addEventListener("click", () =>
@@ -870,7 +999,204 @@ async function loadTests() {
 
 /* -- edit / promote / delete -------------------------------------------- */
 
+/* A test id is matched by regex, so one whose id contains a dot or a dash must
+   not quietly select its neighbours. */
+function escapeRegex(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/* One section, or one test, against the chosen environment — and a report
+   afterwards, because a run you cannot read is a run you have to repeat. */
+async function runScoped({ suite, only, drafts, what }) {
+  const env = $("testEnv").value || "mock";
+  const chosen = (ENVS || []).find((e) => e.name === env);
+  if (chosen && !chosen.ready) {
+    banner("err", `${env} needs ${(chosen.unresolved || []).join(", ")} first.`);
+    configureEnv(env);
+    return;
+  }
+  $("testOutCard").hidden = false;
+  $("testOut").textContent = `running ${what} against ${env}…`;
+  $("testRows").innerHTML = "";
+  const { data } = await api("/api/tests/run", {
+    method: "POST",
+    body: JSON.stringify({ env, suite, only, drafts: !!drafts, kinds: [], verbose: false }),
+  });
+  if (data.error) { banner("err", data.error); $("testOut").textContent = data.error; return; }
+  LAST_RUN = data.job;
+  await followJob(data.job, $("testOut"), $("testElapsed"), $("btnCancelTests"),
+                  null, $("testRows"), $("testProgress"));
+  await showRunReport(data.job, `${what} on ${env}`);
+  await loadTests();
+}
+
+/* Whose problem is it?
+
+   Every failure already carries an attribution — spec changed, backend broke,
+   the test assumes something undocumented, the environment. It was computed on
+   every run and shown only in the terminal, so the console displayed a red row
+   and left the most useful sentence unread. */
+const VERDICT_TONE = {
+  "spec-changed": "warn",
+  "backend-broke-contract": "err",
+  "test-assumes-undocumented": "warn",
+  "spec-silent": "warn",
+  "environment-or-data": "warn",
+  unknown: "warn",
+};
+
+function renderVerdicts(report) {
+  const items = (report.suites || []).flatMap((s) =>
+    (s.results || []).map((r) => ({ ...r, suite: s.name })));
+  const judged = items.filter((i) => i.verdict);
+  const host = $("testVerdicts");
+  if (!host) return;
+  if (!judged.length) { host.hidden = true; host.innerHTML = ""; return; }
+
+  // group: one headline repeated twenty times is noise, twenty findings under
+  // one headline is a finding
+  const byKind = {};
+  judged.forEach((i) => (byKind[i.verdict.kind] = byKind[i.verdict.kind] || []).push(i));
+  const order = ["spec-changed", "backend-broke-contract", "test-assumes-undocumented",
+                 "environment-or-data", "spec-silent", "unknown"];
+  host.hidden = false;
+  host.innerHTML = `<h4 style="margin:12px 0 6px">Whose problem is it?</h4>`
+    + order.filter((k) => byKind[k]).map((kind) => {
+      const group = byKind[kind];
+      const v = group[0].verdict;
+      return `
+      <details class="dim" style="margin-bottom:8px" ${group.length <= 3 ? "open" : ""}>
+        <summary style="cursor:pointer;color:var(--${VERDICT_TONE[kind] || "warn"})">
+          <b>${esc(v.headline)}</b> — ${group.length} test(s)</summary>
+        <p class="hint" style="margin:6px 0">${esc(v.guidance || "")}</p>
+        ${group.map((i) => `
+          <div style="font-size:12px;margin:5px 0 5px 10px">
+            <code>${esc(i.suite)}/${esc(i.id || i.name)}</code>
+            ${(i.verdict.evidence || []).map((e) =>
+              `<div class="hint" style="margin:1px 0 0 12px">${esc(e)}</div>`).join("")}
+          </div>`).join("")}
+        ${v.next ? `<p class="hint" style="margin:6px 0 0 0"><b>Next:</b>
+          ${esc(v.next)}</p>` : ""}
+      </details>`;
+    }).join("");
+}
+
+/* The same report for every way of running, so what you read does not depend
+   on which button you pressed. */
+async function showRunReport(job, label) {
+  const rep = (await api(`/api/job/${job}/report`)).data || {};
+  renderVerdicts(rep);
+  const summary = rep.summary || {};
+  const bits = Object.entries(summary).map(([k, v]) => `${v} ${k}`).join("   ");
+  const failed = (summary.fail || 0) + (summary.error || 0);
+  const blocked = summary.blocked || 0;
+  $("testOutHead").hidden = false;
+  $("testOutHead").className = "banner " + (failed ? "err" : blocked ? "warn" : "ok");
+  $("testOutHead").innerHTML =
+    `<b>${esc(label)}</b> — ${esc(bits || "nothing ran")}`
+    + (rep.spec && rep.spec.digest
+        ? `  ·  spec ${esc(String(rep.spec.digest).slice(0, 12))}…` : "")
+    + (failed ? "  ·  look at the failures below before anything else" : "")
+    + (blocked && !failed
+        ? "  ·  blocked means the endpoint under test never ran — fix the setup" : "");
+  return rep;
+}
+
+/* Load a saved test into the workbench so it can be run step by step, rebound
+   and re-saved. Anything unsaved already in there is asked about first —
+   silently replacing work somebody is in the middle of is the one thing this
+   must never do. */
+async function wbLoad(suite, id, stage) {
+  const q = new URLSearchParams({ suite, id, stage: stage || "draft" });
+  const { data } = await api("/api/tests/one?" + q);
+  const test = data.test || data;
+  if (!test || data.error) { banner("err", data.error || "could not read that test"); return; }
+
+  if (wbDirty()) {
+    const keep = confirm(
+      `The workbench has unsaved steps.\n\n`
+      + `Open ${id} instead and lose them?\n\n`
+      + `Cancel to keep what is there — save it first, then open this one.`);
+    if (!keep) {
+      banner("err", "Left the workbench as it was. Save it, then open the other test.");
+      return;
+    }
+  }
+
+  const steps = (test.steps || [test]).map((step) => ({
+    role: step.role || (test.steps ? "step" : "target"),
+    name: step.name || "",
+    request: {
+      method: (step.request || step).method || "GET",
+      path: (step.request || step).path || "",
+      query: wbQueryText(((step.request || step).query) || ""),
+      body: wbBodyFrom((step.request || step).body),
+    },
+    assertions: step.assertions || [],
+    capture: step.capture || {},
+  }));
+  (test.cleanup || []).forEach((step) => steps.push({
+    role: "cleanup", name: step.name || "",
+    request: { method: (step.request || step).method || "DELETE",
+               path: (step.request || step).path || "",
+               query: wbQueryText(((step.request || step).query) || ""),
+               body: wbBodyFrom((step.request || step).body) },
+    assertions: step.assertions || [], capture: {},
+  }));
+
+  WB.steps = steps.length ? steps : [wbBlankStep()];
+  WB.ran = {};
+  WB.loadedFrom = { suite, id, stage };
+  $("wbBody").hidden = false;
+  $("wbToggle").textContent = "Close";
+  await wbInit();
+  $("wbId").value = id;
+  $("wbModule").value = suite;
+  if (test.kind) $("wbKind").value = test.kind;
+  const level = (test.levels || [])[0];
+  if (level) $("wbLevel").value = level;
+  wbRender();
+  $("wbCard").scrollIntoView({ behavior: "smooth", block: "start" });
+  banner("ok", `${id} is open — ${steps.length} step(s). Saving writes back to `
+             + `${suite}, replacing it.`);
+}
+
+/* Unsaved means: there is something in there, and it did not come from a test
+   we just loaded or saved. */
+function wbDirty() {
+  const real = WB.steps.filter((s) => (s.request.path || "").trim());
+  if (!real.length) return false;
+  return !WB.loadedFrom || WB.touched;
+}
+
+function wbQueryText(query) {
+  if (!query || typeof query === "string") return query || "";
+  return Object.entries(query).map(([k, v]) => `${k}=${v}`).join("&");
+}
+
+function wbBodyFrom(body) {
+  if (body === undefined || body === null) return "";
+  return typeof body === "string" ? body : JSON.stringify(body, null, 2);
+}
+
 async function testAction(act, suite, id, stage) {
+  // Running one section, or one test, against whichever environment is chosen
+  // on the left. Without this the only way to run anything was everything, and
+  // the only server it could reach was the mock.
+  if (act === "open") {
+    await wbLoad(suite, id, stage);
+    return;
+  }
+  if (act === "run" || act === "run-suite") {
+    // --only is matched against "id name", so anchoring both ends finds
+    // nothing; anchor the start and require a boundary after the id, or
+    // "dept-create" would also select "dept-create-conflict"
+    await runScoped({ suite, only: act === "run"
+                        ? `^${escapeRegex(id)}( |$)` : undefined,
+                      drafts: stage === "draft" || $("testDrafts").checked,
+                      what: act === "run" ? id : `section ${suite}` });
+    return;
+  }
   if (act === "delete") {
     const { data } = await api("/api/tests/delete",
       { method: "POST", body: JSON.stringify({ suite, id, stage }) });
@@ -988,7 +1314,33 @@ $("editRun").addEventListener("click", () => {
 function fillTestEnvs() {
   $("testEnv").innerHTML = (ENVS || []).map((e) =>
     `<option value="${esc(e.name)}"${e.name === "mock" ? " selected" : ""}>` +
-    `${esc(e.name)} — ${esc(e.base_url || "?")}${e.ready ? "" : "  ⚠"}</option>`).join("");
+    `${esc(e.name)} — ${esc(e.base_url || "needs values")}` +
+    `${e.ready ? "" : "  — needs " + (e.unresolved || []).length + " value(s)"}</option>`)
+    .join("");
+}
+
+/* Levels and modules come from the taxonomy the runner itself uses, counts and
+   all — so what is offered here is exactly what can be selected. */
+async function fillTestSelectors() {
+  const { data } = await api("/api/tests/taxonomy");
+  if (!data || !data.levels) return;
+  $("testLevels").innerHTML = data.levels.map((l) =>
+    `<option value="${esc(l.name)}"${l.tests ? "" : " disabled"}>`
+    + `${esc(l.name)} (${l.tests}) — ${esc(l.means)}</option>`).join("");
+  $("testModules").innerHTML = (data.modules || []).map((m) =>
+    `<option value="${esc(m.name)}">${esc(m.name)} (${m.tests})</option>`).join("");
+}
+
+const pickedValues = (id) => [...$(id).selectedOptions].map((o) => o.value);
+
+/* Choosing an environment that is not ready should lead somewhere. */
+function offerConfigure(name, where) {
+  const env = (ENVS || []).find((e) => e.name === name);
+  if (!env || env.ready) return false;
+  banner("err", `${name} needs ${(env.unresolved || []).join(", ")} before it can be used`
+              + `${where ? " " + where : ""}. Opening Configure.`);
+  configureEnv(name);
+  return true;
 }
 
 async function runTests(kinds) {
@@ -997,13 +1349,18 @@ async function runTests(kinds) {
   const { data } = await api("/api/tests/run", {
     method: "POST",
     body: JSON.stringify({ env: $("testEnv").value, kinds, verbose: false,
+                           levels: pickedValues("testLevels"),
+                           modules: pickedValues("testModules"),
+                           only: $("testOnly").value.trim() || undefined,
                            drafts: $("testDrafts").checked,
                            tags: TAG_FILTER ? [TAG_FILTER] : [] }),
   });
   if (data.error) { $("testOut").textContent = data.error; return; }
+  LAST_RUN = data.job;
   await followJob(data.job, $("testOut"), $("testElapsed"), $("btnCancelTests"),
                   null, $("testRows"), $("testProgress"));
   const rep = (await api(`/api/job/${data.job}/report`)).data || {};
+  renderVerdicts(rep);
   const s = rep.summary || {};
   const bits = Object.entries(s).map(([k, v]) => `${v} ${k}`).join("  ");
   const spec = (rep.spec || {});
@@ -1019,6 +1376,10 @@ async function runTests(kinds) {
          `${rep.env || $("testEnv").value}: ${bits || "nothing ran"}`
          + (s.blocked ? " — blocked means the endpoint under test never ran; its setup failed."
                       : ""));
+  // The badges on every test are its history, and the run just changed it.
+  // Only the scoped run refreshed them, so a full run left every badge showing
+  // whatever it said when the list was last drawn.
+  await loadTests();
 }
 
 /* -- authoring ---------------------------------------------------------- */
@@ -1657,6 +2018,742 @@ $("btnCmpCopy").addEventListener("click", () => exportCompare(false));
 $("btnCmpDownload").addEventListener("click", () => exportCompare(true));
 $("btnCompare").addEventListener("click", runCompare);
 
+/* ========================================================================
+   Workbench — assembling a flow from real responses
+   ======================================================================== */
+
+/* The model has always supported chaining: capture a value, use {{it}} later.
+   What was missing was any way to DISCOVER the path — you had to know the
+   response said `data.id` and type it correctly. So: run a step, look at what
+   actually came back, click the value, and the binding writes itself. */
+
+let WB = { steps: [], ran: {}, loadedFrom: null, touched: false };
+
+function wbBlankStep(role) {
+  // A lone step is the thing being tested, not scaffolding for it. Defaulting
+  // to "setup" made a one-step flow structurally unable to pass: its failure
+  // reported as blocked, which tells you to fix a setup that IS the test.
+  return { role: role || "target", name: "",
+           request: { method: "POST", path: "", body: "" },
+           assertions: [{ type: "status", in: [200, 201] }], capture: {} };
+}
+
+/* The operations this step could call, for the method it is set to. Typing a
+   path from memory is how you end up testing an endpoint that does not exist;
+   the spec is right here, so offer it. */
+let WB_ROUTES = [];
+
+function wbOperations(method) {
+  return WB_ROUTES.filter((r) => r.method === (method || "GET"))
+    .sort((a, b) => a.path.localeCompare(b.path));
+}
+
+/* The path as the spec writes it, so a path already filled with real ids or
+   {{variables}} still matches the operation it came from. */
+function wbBarePath(step) {
+  const filled = step.request.path || "";
+  if (!filled) return "";
+  const exact = WB_ROUTES.find((r) => r.path === filled);
+  if (exact) return exact.path;
+  const shaped = filled.replace(/\{\{[^}]+\}\}/g, "{x}")
+                       .replace(/\/[0-9a-f-]{8,}/gi, "/{x}");
+  const match = WB_ROUTES.find((r) =>
+    r.path.replace(/\{[^}]+\}/g, "{x}") === shaped);
+  return match ? match.path : "";
+}
+
+/* Choosing an operation fills everything the spec can supply: a path with its
+   parameters typed correctly, the required query, and a valid body. */
+async function wbPickOperation(index, specPath) {
+  const step = WB.steps[index];
+  if (!specPath) return;
+  const q = new URLSearchParams({ method: step.request.method, path: specPath });
+  const { data } = await api("/api/sample-request?" + q);
+  if (!data || data.error) { banner("err", (data && data.error) || "could not read the spec"); return; }
+  step.request.path = data.path || specPath;
+  step.request.query = data.query || "";
+  if (data.body != null) step.request.body = JSON.stringify(data.body, null, 2);
+  if (!step.name) step.name = data.summary || `${step.request.method} ${specPath}`;
+  // the spec says which statuses are documented; a success assertion drawn
+  // from that beats a guess at 200
+  const good = (data.statuses || []).map(Number)
+    .filter((c) => c >= 200 && c < 300);
+  if (good.length) {
+    step.assertions = [good.length === 1
+      ? { type: "status", equals: good[0] }
+      : { type: "status", in: good }];
+  }
+  wbRender();
+  const notes = [];
+  if ((data.required_query || []).length) notes.push(`required query: ${data.required_query.join(", ")}`);
+  if (data.statuses && data.statuses.length) notes.push(`documents ${data.statuses.join(", ")}`);
+  banner("ok", `Filled from the spec${notes.length ? " — " + notes.join("  ·  ") : ""}`
+             + ". Replace any id with a {{variable}} from an earlier step.");
+}
+
+/* The values that resolve at run time. Discoverable only from a placeholder
+   before this, which is the same as not existing: everybody wrote constants,
+   and the second run collided with the first. */
+let DYNAMIC_VALUES = [];
+
+async function loadDynamicValues() {
+  if (DYNAMIC_VALUES.length) return DYNAMIC_VALUES;
+  try {
+    const { data } = await api("/api/tests/values");
+    DYNAMIC_VALUES = data.values || [];
+  } catch { DYNAMIC_VALUES = []; }
+  return DYNAMIC_VALUES;
+}
+
+function renderDynamicChips() {
+  $("wbSteps").querySelectorAll("[data-values]").forEach((host) => {
+    const i = +host.dataset.values;
+    host.innerHTML = DYNAMIC_VALUES.map((v) =>
+      `<button type="button" class="chip" data-insert="${i}|${esc(v.name)}"
+         title="${esc(v.about)} — e.g. ${esc(v.example)}">{{${esc(v.name)}}}</button>`)
+      .join("");
+    host.querySelectorAll("[data-insert]").forEach((chip) =>
+      chip.addEventListener("click", () => {
+        const [at, name] = chip.dataset.insert.split("|");
+        const field = $("wbSteps").querySelector(`[data-body="${at}"]`);
+        if (!field) return;
+        const start = field.selectionStart ?? field.value.length;
+        const token = `{{${name}}}`;
+        field.value = field.value.slice(0, start) + token + field.value.slice(start);
+        WB.steps[+at].request.body = field.value;
+        WB.touched = true;
+        field.focus();
+        field.setSelectionRange(start + token.length, start + token.length);
+      }));
+  });
+}
+
+function wbRender() {
+  if (!WB.steps.length) WB.steps.push(wbBlankStep());
+  const produced = [];                       // what is in scope by each step
+  $("wbSteps").innerHTML = WB.steps.map((step, i) => {
+    const ran = WB.ran[i];
+    const consumes = wbVariablesUsed(step);
+    const known = new Set(produced.flat());
+    const missing = consumes.filter((v) => !known.has(v));
+    const outs = Object.keys(step.capture || {});
+    produced.push(outs);
+    const isLast = i === WB.steps.length - 1;
+    return `
+    <div class="wbstep ${ran ? "ran-" + ran.outcome : ""}" data-i="${i}">
+      <header>
+        <span class="n">${i + 1}</span>
+        <select data-role="${i}" style="width:auto">
+          ${["setup", "target", "step", "cleanup"].map((r) =>
+            `<option value="${r}"${step.role === r ? " selected" : ""}>${r}</option>`).join("")}
+        </select>
+        <input type="text" data-name="${i}" value="${esc(step.name || "")}"
+               placeholder="what this step does" style="flex:1">
+        ${ran ? `<span class="tag">${ran.status ?? "—"} · ${ran.ms ?? "?"}ms</span>` : ""}
+        ${step.request.method === "POST" && Object.keys(step.capture || {}).length
+          ? `<button class="sm" data-cleanup="${i}"
+               title="add a step that deletes what this one creates">+ cleanup</button>` : ""}
+        <button class="sm" data-run="${i}">Run to here</button>
+        <button class="sm" data-del="${i}"${WB.steps.length < 2 ? " disabled" : ""}>×</button>
+      </header>
+      <div class="inner">
+        <div class="row">
+          <div style="max-width:120px"><label>Method</label>
+            <select data-method="${i}">
+              ${["GET", "POST", "PUT", "PATCH", "DELETE"].map((m) =>
+                `<option${step.request.method === m ? " selected" : ""}>${m}</option>`).join("")}
+            </select></div>
+          <div style="flex:1"><label>Operation</label>
+            <select data-op="${i}">
+              <option value="">— pick one from the spec —</option>
+              ${wbOperations(step.request.method).map((r) =>
+                `<option value="${esc(r.path)}"${r.path === wbBarePath(step) ? " selected" : ""}>`
+                + `${esc(r.path)}${r.summary ? "  —  " + esc(r.summary) : ""}</option>`).join("")}
+            </select></div>
+        </div>
+        <label>Path <span class="hint">— edit it to use a captured value,
+          e.g. {{departmentId}} in place of an id</span></label>
+        <input type="text" data-path="${i}" value="${esc(step.request.path || "")}"
+               placeholder="/api/v1/…">
+        ${step.request.query ? `
+        <label>Query</label>
+        <input type="text" data-query="${i}" value="${esc(step.request.query)}">` : ""}
+        ${["POST", "PUT", "PATCH"].includes(step.request.method) ? `
+        <label>Body <span class="hint">— click a value to insert it; these resolve
+          when the test runs, so two runs cannot collide</span></label>
+        <div class="quick" data-values="${i}"></div>
+        <textarea data-body="${i}" rows="4"
+          placeholder='{"title": "{{$uuid}}"}'>${esc(wbBodyText(step))}</textarea>` : ""}
+
+        <details class="wbasserts" data-asserts="${i}"${
+            (step.assertions || []).length > 1 ? " open" : ""}>
+          <summary style="cursor:pointer;font-size:12px;margin-top:8px">
+            Assertions (${(step.assertions || []).length}) — what must hold for this
+            step to pass</summary>
+          <div class="wbahost" data-ahost="${i}" style="margin-top:7px"></div>
+          ${ran && ran.bindable && ran.bindable.length ? `
+            <p class="hint">Tip: a value below can be asserted on as well as bound —
+              its path is what an assertion needs.</p>` : ""}
+        </details>
+
+        <div class="wbwire">
+          <div><b>uses</b>${consumes.length
+            ? consumes.map((v) => `<span class="wbchip ${missing.includes(v) ? "missing" : "in"}"
+                >{{${esc(v)}}}</span>`).join("")
+            : '<span class="hint">nothing from earlier steps</span>'}</div>
+          <div><b>provides</b>${outs.length
+            ? outs.map((v) => `<span class="wbchip out" data-unbind="${i}|${esc(v)}"
+                title="click to remove">{{${esc(v)}}} ×</span>`).join("")
+            : '<span class="hint">nothing yet</span>'}</div>
+        </div>
+        ${missing.length ? `<p class="hint" style="color:var(--err)">
+          ${missing.map(esc).join(", ")} ${missing.length > 1 ? "are" : "is"} not provided by
+          any earlier step — run an earlier step and bind ${missing.length > 1 ? "them" : "it"},
+          or add ${missing.length > 1 ? "them" : "it"} to the flow's data.</p>` : ""}
+
+        ${ran && ran.bindable && ran.bindable.length ? `
+        <details${isLast ? " open" : ""} style="margin-top:9px">
+          <summary style="cursor:pointer;font-size:12px">
+            Values you can carry forward — click one
+            (${ran.bindable.length})</summary>
+          ${wbListNote(ran.bindable)}
+          <div style="max-height:230px;overflow:auto;margin-top:6px">
+            ${ran.bindable.map((b) => `
+              <div class="wbfield">
+                <span class="p">${esc(b.path)}</span>
+                <span class="v">${esc(String(b.value))}</span>
+                ${b.looks_like_id ? '<span class="id">ID</span>' : ""}
+                ${b.of_list ? '<span class="id" style="color:var(--accent)">COUNT</span>' : ""}
+                <button type="button" class="sm"
+                        data-bind="${i}|${esc(b.path)}|${esc(b.suggested)}"
+                  >use as {{${esc(b.suggested)}}}</button>
+                <button type="button" class="sm"
+                        data-assert="${i}|${esc(b.path)}|${esc(String(b.value))}|${
+                          b.of_list ? "count" : "value"}"
+                  >assert on it</button>
+              </div>`).join("")}
+          </div>
+        </details>` : ""}
+        ${ran && ran.response_json !== undefined && ran.response_json !== null ? `
+        <details style="margin-top:6px">
+          <summary style="cursor:pointer;font-size:12px">The whole response</summary>
+          <pre style="max-height:260px;overflow:auto;margin-top:6px;font-size:11.5px"
+            >${esc(JSON.stringify(ran.response_json, null, 2))}</pre>
+        </details>` : ""}
+        ${ran && ran.checks && ran.checks.length ? `
+        <div style="margin-top:7px;font-size:12px">
+          ${ran.checks.map((c) => `<div style="color:var(--${c.ok ? "ok" : "err"})">
+            ${c.ok ? "PASS" : "FAIL"} ${esc(c.label)}${c.ok ? "" : " — " + esc(c.detail || "")}
+          </div>
+          ${c.rebind && (c.rebind.candidates || []).length ? `
+            <div style="margin:4px 0 8px 18px">
+              <div class="hint">The field moved or was renamed. Point
+                <code>{{${esc(c.rebind.name)}}}</code> at what is there now:</div>
+              ${c.rebind.candidates.map((cand) => `
+                <div class="wbfield"
+                     data-rebind="${i}|${esc(c.rebind.name)}|${esc(cand.path)}">
+                  <span class="p">${esc(cand.path)}</span>
+                  <span class="v">${esc(String(cand.value))}</span>
+                  <span class="hint">${esc(cand.why)}</span>
+                </div>`).join("")}
+            </div>` : ""}`).join("")}
+        </div>` : ""}
+      </div>
+    </div>`;
+  }).join("");
+  // the editors are built, not stringified: they are the same component the
+  // save dialog uses, so an assertion means the same thing wherever it is
+  // written
+  WB.steps.forEach((step, i) => {
+    const host = $("wbSteps").querySelector(`[data-ahost="${i}"]`);
+    if (host) assertionEditor(host, step.assertions || []);
+  });
+  renderDynamicChips();
+  wbWire();
+}
+
+/* Read every step's assertions out of its editor, so what runs is what is on
+   screen rather than what was last stored. */
+function wbSyncAssertions() {
+  WB.steps.forEach((step, i) => {
+    const host = $("wbSteps").querySelector(`[data-ahost="${i}"]`);
+    if (!host) return;
+    const read = readAssertions(host);
+    step.assertions = read.length ? read : [{ type: "status", in: [200, 201] }];
+  });
+}
+
+/* Every {{name}} a step refers to, so "uses" is read from the step itself and
+   cannot fall out of step with what it actually needs. */
+/* A list offers its first item and its length — say so, because a panel
+   showing data.items[0] and nothing else reads as "the response held one
+   thing", which is exactly the wrong conclusion. */
+function wbListNote(fields) {
+  const lists = fields.filter((f) => f.of_list);
+  if (!lists.length) return "";
+  return `<p class="hint" style="margin:5px 0 0 0">`
+    + lists.map((l) => `<code>${esc(l.path.replace(/\.length$/, ""))}</code> holds `
+        + `<b>${l.value}</b> item${l.value === 1 ? "" : "s"}`).join("; ")
+    + `. Fields below come from the first one; bind <code>.length</code> to assert `
+    + `how many, and open the whole response to see them all.</p>`;
+}
+
+function wbVariablesUsed(step) {
+  const text = JSON.stringify(step.request || {});
+  const found = new Set();
+  for (const m of text.matchAll(/\{\{([^}]+)\}\}/g)) {
+    const name = m[1].trim();
+    if (!name.startsWith("$")) found.add(name);   // $uuid and friends are built in
+  }
+  return [...found];
+}
+
+function wbBodyText(step) {
+  const b = step.request.body;
+  if (b === undefined || b === null || b === "") return "";
+  return typeof b === "string" ? b : JSON.stringify(b, null, 2);
+}
+
+/* Redraw only one step's uses/provides, leaving every other node — and every
+   listener attached to it — alone. */
+function wbRefreshWire(index) {
+  const host = $("wbSteps").querySelector(`.wbstep[data-i="${index}"] .wbwire`);
+  if (!host) return;
+  const step = WB.steps[index];
+  const known = new Set(WB.steps.slice(0, index)
+    .flatMap((s) => Object.keys(s.capture || {})));
+  const consumes = wbVariablesUsed(step);
+  const missing = consumes.filter((v) => !known.has(v));
+  const outs = Object.keys(step.capture || {});
+  host.innerHTML = `
+    <div><b>uses</b>${consumes.length
+      ? consumes.map((v) => `<span class="wbchip ${missing.includes(v) ? "missing" : "in"}"
+          >{{${esc(v)}}}</span>`).join("")
+      : '<span class="hint">nothing from earlier steps</span>'}</div>
+    <div><b>provides</b>${outs.length
+      ? outs.map((v) => `<span class="wbchip out" data-unbind="${index}|${esc(v)}"
+          title="click to remove">{{${esc(v)}}} ×</span>`).join("")
+      : '<span class="hint">nothing yet</span>'}</div>`;
+  host.querySelectorAll("[data-unbind]").forEach((el) =>
+    el.addEventListener("click", () => {
+      const [i, name] = el.dataset.unbind.split("|");
+      delete WB.steps[+i].capture[name];
+      wbRender();
+    }));
+}
+
+function wbWire() {
+  const q = (sel, fn) => $("wbSteps").querySelectorAll(sel).forEach(fn);
+  q("[data-role]", (el) => el.addEventListener("change", () => {
+    WB.steps[+el.dataset.role].role = el.value; wbRender();
+  }));
+  q("[data-name]", (el) => el.addEventListener("input", () => {
+    WB.steps[+el.dataset.name].name = el.value;
+    WB.touched = true;
+  }));
+  q("[data-method]", (el) => el.addEventListener("change", () => {
+    WB.steps[+el.dataset.method].request.method = el.value; wbRender();
+  }));
+  q("[data-path]", (el) => el.addEventListener("input", () => {
+    const at = +el.dataset.path;
+    WB.steps[at].request.path = el.value;
+    WB.touched = true;
+    // Update in place. A full re-render here replaced the DOM on blur —
+    // including the Run button you were on your way to clicking, so the click
+    // landed on a detached node and nothing happened.
+    wbRefreshWire(at);
+    // and keep the operation picker honest: a hand-edited path that no longer
+    // matches any operation must stop claiming the one it used to be
+    const picker = $("wbSteps").querySelector(`[data-op="${at}"]`);
+    if (picker) picker.value = wbBarePath(WB.steps[at]);
+  }));
+  q("[data-query]", (el) => el.addEventListener("input", () => {
+    WB.steps[+el.dataset.query].request.query = el.value;
+  }));
+  q("[data-op]", (el) => el.addEventListener("change", () =>
+    wbPickOperation(+el.dataset.op, el.value)));
+  q("[data-body]", (el) => el.addEventListener("input", () => {
+    WB.steps[+el.dataset.body].request.body = el.value;
+  }));
+  q("[data-run]", (el) => el.addEventListener("click", () => wbRun(+el.dataset.run)));
+  q("[data-del]", (el) => el.addEventListener("click", () => {
+    const gone = +el.dataset.del;
+    WB.steps.splice(gone, 1);
+    // Keep what the other steps returned. Throwing all of it away meant
+    // removing one step lost the responses you were binding from.
+    const kept = {};
+    Object.keys(WB.ran).map(Number).forEach((i) => {
+      if (i < gone) kept[i] = WB.ran[i];
+      else if (i > gone) kept[i - 1] = WB.ran[i];
+    });
+    WB.ran = kept;
+    wbRender();
+  }));
+  q("[data-bind]", (el) => el.addEventListener("click", () => {
+    const [i, path, suggested] = el.dataset.bind.split("|");
+    wbBind(+i, path, suggested);
+  }));
+  q("[data-cleanup]", (el) => el.addEventListener("click", () => wbCleanup(+el.dataset.cleanup)));
+  q("[data-assert]", (el) => el.addEventListener("click", () => {
+    const [i, path, value, kind] = el.dataset.assert.split("|");
+    wbAssertOn(+i, path, value, kind);
+  }));
+  q("[data-rebind]", (el) => el.addEventListener("click", () => {
+    const [i, name, path] = el.dataset.rebind.split("|");
+    WB.steps[+i].capture[name] = path;          // one click, one edit
+    wbRender();
+    banner("ok", `{{${name}}} now reads ${path}. Run the step again to confirm.`);
+  }));
+  q("[data-unbind]", (el) => el.addEventListener("click", () => {
+    const [i, name] = el.dataset.unbind.split("|");
+    delete WB.steps[+i].capture[name];
+    wbRender();
+  }));
+}
+
+/* Auto-named, with the chance to change it — the name is proposed from the
+   field and the resource it came from, which is right often enough that
+   typing one would be busywork, and wrong often enough to stay editable. */
+function wbBind(index, path, suggested) {
+  const taken = new Set(WB.steps.flatMap((s) => Object.keys(s.capture || {})));
+  let name = suggested;
+  let n = 2;
+  while (taken.has(name)) name = `${suggested}${n++}`;
+  const chosen = prompt(
+    `Call this value what?\n\n${path}\n\nLater steps use it as {{name}}.`, name);
+  if (!chosen) return;
+  WB.steps[index].capture = WB.steps[index].capture || {};
+  WB.steps[index].capture[chosen.trim()] = path;
+  wbRender();
+  banner("ok", `{{${chosen.trim()}}} is now available to every step after this one.`);
+}
+
+/* What a flow creates on a shared server stays there unless something removes
+   it. The spec knows which endpoint deletes the thing, so offer the step
+   rather than depend on remembering to write one. */
+/* Writing an assertion is mostly getting the path right, and the path is on
+   screen. For a list it is the COUNT that matters — "at least one came back"
+   is the assertion people actually want, and `length_gte 1` is not something
+   anybody guesses. */
+function wbAssertOn(index, path, value, kind) {
+  wbSyncAssertions();
+  const step = WB.steps[index];
+  step.assertions = (step.assertions || []).filter(
+    (a) => !(a.type === "jsonpath" && a.path === path));
+  if (kind === "count") {
+    step.assertions.push({ type: "jsonpath", path: path.replace(/\.length$/, ""),
+                           op: "length_gte", value: 1 });
+  } else {
+    const n = Number(value);
+    step.assertions.push(Number.isFinite(n) && value !== ""
+      ? { type: "jsonpath", path, op: "equals", value: n }
+      : { type: "jsonpath", path, op: "exists" });
+  }
+  wbRender();
+  const added = step.assertions[step.assertions.length - 1];
+  banner("ok", kind === "count"
+    ? `Asserting ${added.path} has at least 1 item. Change the operator to `
+      + `length for an exact count, or length_gte for a floor.`
+    : `Asserting ${added.path} ${added.op}${added.value !== undefined
+        ? " " + added.value : ""}. Edit it below if that is not what you meant.`);
+}
+
+async function wbCleanup(index) {
+  const step = WB.steps[index];
+  const variable = Object.keys(step.capture || {})[0];
+  if (!variable) { banner("err", "Bind the created id first, so cleanup knows what to remove."); return; }
+  const q = new URLSearchParams({ path: step.request.path, var: variable });
+  const { data } = await api("/api/tests/cleanup-for?" + q);
+  if (data.error) { banner("err", data.error); return; }
+  if (!data.found) {
+    banner("err", `No cleanup added — ${data.why}. Add a step by hand if something else `
+                + `removes it.`);
+    return;
+  }
+  WB.steps.push({ role: "cleanup", name: data.step.name,
+                  request: { method: "DELETE", path: data.step.request.path, body: "" },
+                  assertions: data.step.assertions, capture: {} });
+  wbRender();
+  banner("ok", `Added a cleanup step using ${data.operation}. Cleanup is best-effort: `
+             + `it runs even when the flow fails, and its own failure does not fail the flow.`);
+}
+
+/* "a=1&b=2" is what a person types; the runner wants it as pairs. */
+function wbQueryObject(text) {
+  const out = {};
+  String(text || "").replace(/^\?/, "").split("&").forEach((pair) => {
+    if (!pair) return;
+    const [k, ...rest] = pair.split("=");
+    if (k) out[k] = rest.join("=");
+  });
+  return out;
+}
+
+function wbCollect(includeCleanup = true) {
+  return WB.steps.filter((s) => includeCleanup || s.role !== "cleanup").map((step) => {
+    const out = { role: step.role, name: step.name || undefined,
+                  request: { method: step.request.method, path: step.request.path,
+                             ...(step.request.query
+                                 ? { query: wbQueryObject(step.request.query) } : {}) },
+                  assertions: step.assertions || [{ type: "status", in: [200, 201] }] };
+    const text = (step.request.body || "").toString().trim();
+    if (text) {
+      try { out.request.body = JSON.parse(text); }
+      catch { out.request.body = text; }        // a non-JSON body is still a body
+    }
+    if (Object.keys(step.capture || {}).length) out.capture = step.capture;
+    return out;
+  });
+}
+
+async function wbRun(upto) {
+  wbSyncAssertions();
+  const steps = wbCollect();
+  if (!steps.some((s) => s.request.path)) { banner("err", "Give a step a path first."); return; }
+  $("wbSteps").querySelectorAll("[data-run]").forEach((b) => (b.disabled = true));
+  try {
+    // Only claim this as a run of the saved test when it IS the saved test:
+    // loaded from disk, not edited since, and run end to end. An experiment
+    // that happens to pass must not put a green badge on something nobody ran.
+    const faithful = WB.loadedFrom && !WB.touched && upto >= steps.length - 1;
+    const { data } = await api("/api/tests/chain", {
+      method: "POST",
+      body: JSON.stringify({ target: $("wbEnv").value || "mock", upto,
+                             kind: $("wbKind").value, steps,
+                             ...(faithful ? { record: WB.loadedFrom } : {}) }),
+    });
+    if (data.error) { banner("err", data.error); return; }
+    if (!data.ok) { banner("err", (data.errors || ["could not run"]).join("  ·  ")); return; }
+    (data.result.steps || []).forEach((r, i) => (WB.ran[i] = r));
+    wbRender();
+    const last = (data.result.steps || [])[upto];
+    banner(last && last.outcome === "pass" ? "ok" : "err",
+           `Ran ${data.ran} of ${data.of} against ${data.target}`
+           + (last ? ` — step ${upto + 1} ${last.outcome}` : "")
+           + (data.recorded ? `. Recorded against ${data.recorded}.`
+              : WB.loadedFrom ? ". Not recorded — this differs from what is saved."
+              : ""));
+    if (data.recorded) await loadTests();
+  } catch (err) {
+    banner("err", `Could not run: ${err.message}`);
+  } finally {
+    $("wbSteps").querySelectorAll("[data-run]").forEach((b) => (b.disabled = false));
+  }
+}
+
+async function wbSave() {
+  wbSyncAssertions();
+  const id = $("wbId").value.trim();
+  const module = $("wbModule").value.trim();
+  if (!id) { banner("err", "Give the flow an id."); return; }
+  if (!module) { banner("err", "Which module does this belong to?"); return; }
+  const all = wbCollect();
+  const scenario = {
+    id, name: $("wbId").value.trim().replace(/-/g, " "),
+    kind: $("wbKind").value, levels: [$("wbLevel").value],
+    // cleanup is a separate list: it runs even when the flow fails, which is
+    // the only way a failed run does not leave its rows behind
+    steps: all.filter((s) => s.role !== "cleanup"),
+    cleanup: all.filter((s) => s.role === "cleanup"),
+  };
+  if (!scenario.cleanup.length) delete scenario.cleanup;
+  const { data } = await api("/api/tests/save-flow", {
+    method: "POST",
+    body: JSON.stringify({ suite: module, stage: "draft", flow: scenario }),
+  });
+  if (!data.ok) { banner("err", (data.errors || [data.error || "refused"]).join("  ·  ")); return; }
+  WB.loadedFrom = { suite: module, id, stage: "draft" };
+  WB.touched = false;
+  banner("ok", `Saved to ${data.file}. It is a draft until it passes.`);
+  $("wbSaveNote").textContent =
+    `Saved as ${id} in ${module} (${$("wbLevel").value}). Drafts are gitignored — `
+    + `promote it once it passes and it joins the shared suite.`;
+  loadTests();
+}
+
+function wbDescribeTarget() {
+  const t = $("wbEnv").value || "mock";
+  $("wbTarget").textContent = t;
+  const live = t !== "mock" && t !== "mock-auth" && t !== "mock-login";
+  $("wbLiveWarn").hidden = !live;
+  $("wbLiveWarn").className = "banner warn";
+  if (live) {
+    const env = (ENVS || []).find((e) => e.name === t);
+    const ro = env && env.readonly;
+    $("wbLiveWarn").textContent = ro
+      ? `Heads up: ${t} is read-only, so steps here may read but never create, `
+        + `change or delete.`
+      : `Heads up: steps run against ${t}, a real server. Anything a step creates is `
+        + `really created — use {{$uuid}} in names so runs cannot collide, and add a `
+        + `cleanup step for what you make.`;
+  }
+}
+
+async function wbInit() {
+  await loadDynamicValues();
+  try {
+    const routes = await api("/api/routes");
+    WB_ROUTES = (routes.data.routes || routes.data || []).map((r) =>
+      ({ method: r.method, path: r.path, summary: r.summary || "" }));
+  } catch { WB_ROUTES = []; }
+  const { data } = await api("/api/tests/taxonomy");
+  if (data && data.levels) {
+    $("wbLevel").innerHTML = data.levels
+      .map((l) => `<option value="${esc(l.name)}"${l.name === "regression" ? " selected" : ""}>`
+                + `${esc(l.name)} — ${esc(l.means)}</option>`).join("");
+    $("wbModules").innerHTML = (data.modules || [])
+      .map((m) => `<option value="${esc(m.name)}">`).join("");
+  }
+  $("wbEnv").innerHTML = ['<option value="mock">mock — the local mock</option>']
+    .concat((ENVS || []).filter((e) => e.name !== "mock")
+      .map((e) => `<option value="${esc(e.name)}">${esc(e.name)}`
+                + `${e.ready ? "" : "  — needs " + (e.unresolved || []).length
+                                  + " value(s)"}</option>`)).join("");
+  wbDescribeTarget();
+  wbRender();
+}
+
+$("wbToggle").addEventListener("click", () => {
+  const open = $("wbBody").hidden;
+  $("wbBody").hidden = !open;
+  $("wbToggle").textContent = open ? "Close" : "Open";
+  if (open) wbInit();
+});
+$("wbAdd").addEventListener("click", () => {
+  // adding a second step makes the first one setup and the new one the target
+  if (WB.steps.length === 1 && WB.steps[0].role === "target") {
+    WB.steps[0].role = "setup";
+  }
+  WB.steps.push(wbBlankStep("target"));
+  wbRender();
+});
+$("wbRunAll").addEventListener("click", () => wbRun(WB.steps.length - 1));
+$("wbSave").addEventListener("click", wbSave);
+$("wbEnv").addEventListener("change", () => {
+  wbDescribeTarget();
+  offerConfigure($("wbEnv").value, "to run steps against");
+});
+
+/* ------------------------------------------- per-environment test data */
+
+let ENV_DATA = { name: null, rows: [] };
+
+async function openEnvData(name) {
+  const { data } = await api(`/api/environments/${encodeURIComponent(name)}/data`);
+  if (data.error) { banner("err", data.error); return; }
+  ENV_DATA = { name, rows: (data.data || []).map((r) => ({
+    name: r.name,
+    value: r.literal ? r.value : "",
+    secret: !r.literal,
+  })) };
+  $("envDataName").textContent = name;
+  $("envDataCard").hidden = false;
+  $("envDataNote").textContent = data.note || "";
+  renderEnvData();
+  $("envDataCard").scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function renderEnvData() {
+  $("envDataRows").innerHTML = ENV_DATA.rows.length
+    ? ENV_DATA.rows.map((row, i) => `
+      <div class="row" style="align-items:flex-end">
+        <div style="flex:1"><label>Name</label>
+          <input type="text" data-dname="${i}" value="${esc(row.name)}"
+                 placeholder="expectedCountries"></div>
+        <div style="flex:1"><label>Value on this server</label>
+          <input type="text" data-dvalue="${i}" value="${esc(row.value ?? "")}"
+                 placeholder="${row.secret ? "set in .env — type to replace" : "250"}"></div>
+        <div style="align-self:center">
+          <label style="font-weight:400;white-space:nowrap">
+            <input type="checkbox" data-dsecret="${i}"${row.secret ? " checked" : ""}>
+            keep out of git</label></div>
+        <div><button class="sm danger" data-ddel="${i}">remove</button></div>
+      </div>`).join("")
+    : '<p class="hint">Nothing yet. Add a value that differs between servers — a row id, '
+      + 'an expected count.</p>';
+
+  const q = (sel, fn) => $("envDataRows").querySelectorAll(sel).forEach(fn);
+  q("[data-dname]", (el) => el.addEventListener("input", () => {
+    ENV_DATA.rows[+el.dataset.dname].name = el.value; }));
+  q("[data-dvalue]", (el) => el.addEventListener("input", () => {
+    ENV_DATA.rows[+el.dataset.dvalue].value = el.value; }));
+  q("[data-dsecret]", (el) => el.addEventListener("change", () => {
+    ENV_DATA.rows[+el.dataset.dsecret].secret = el.checked; }));
+  q("[data-ddel]", (el) => el.addEventListener("click", () => {
+    ENV_DATA.rows.splice(+el.dataset.ddel, 1); renderEnvData(); }));
+}
+
+$("envDataAdd").addEventListener("click", () => {
+  ENV_DATA.rows.push({ name: "", value: "", secret: false });
+  renderEnvData();
+});
+$("envDataClose").addEventListener("click", () => { $("envDataCard").hidden = true; });
+$("envDataSave").addEventListener("click", async () => {
+  const { data } = await api(
+    `/api/environments/${encodeURIComponent(ENV_DATA.name)}/data`,
+    { method: "POST", body: JSON.stringify({ data: ENV_DATA.rows }) });
+  if (!data.ok) { banner("err", data.error); return; }
+  banner("ok", data.message);
+  $("envDataNote").textContent = (data.kept_out_of_git || []).length
+    ? `${data.kept_out_of_git.join(", ")} went to .env, not the committed file.`
+    : "Saved to environments.json — commit it so the team shares these values.";
+  await loadEnvironments();
+});
+
+/* ------------------------------------------------- adding an environment */
+
+$("btnEnvNew").addEventListener("click", () => {
+  $("envNewCard").hidden = !$("envNewCard").hidden;
+  if (!$("envNewCard").hidden) $("envNewName").focus();
+});
+$("envNewCancel").addEventListener("click", () => { $("envNewCard").hidden = true; });
+$("envNewMode").addEventListener("change", () => {
+  $("envNewLoginWrap").hidden = $("envNewMode").value !== "login";
+});
+
+$("envNewSave").addEventListener("click", async () => {
+  const name = $("envNewName").value.trim().toLowerCase();
+  if (!name) { banner("err", "Give the environment a name."); return; }
+  const { data } = await api("/api/environments/create", {
+    method: "POST",
+    body: JSON.stringify({
+      name, description: $("envNewDesc").value.trim(),
+      mode: $("envNewMode").value,
+      readonly: $("envNewReadonly").checked,
+      login_path: $("envNewLoginPath").value.trim() || undefined,
+    }),
+  });
+  if (!data.ok) { banner("err", data.error); return; }
+  banner("ok", data.message);
+  $("envNewNote").textContent = data.needs.length
+    ? `Now set ${data.needs.join(", ")} — opening Configure.`
+    : "Nothing left to set.";
+  await loadEnvironments();
+  $("envNewCard").hidden = true;
+  if (data.needs.length) configureEnv(name);
+});
+
+/* The last run, as a file. HTML to read or forward, JUnit for a CI server that
+   already renders it, JSON for anything else — the same run, three ways out. */
+let LAST_RUN = null;          // this tab's own run, so the download is yours
+
+$("testReport").addEventListener("click", () => {
+  const kind = prompt(
+    "Which report?\n\n  html  — open it, or send it to whoever asked\n"
+    + "  xml   — JUnit, for a CI server\n  json  — for a script",
+    "html");
+  if (!kind) return;
+  const wanted = kind.trim().toLowerCase();
+  if (!["html", "xml", "json"].includes(wanted)) {
+    banner("err", "html, xml or json.");
+    return;
+  }
+  // ask for THIS tab's run. Without the id you get whatever finished last,
+  // which is somebody else's results whenever anything ran in between.
+  window.location.href = `/api/tests/report.${wanted}`
+    + (LAST_RUN ? `?job=${encodeURIComponent(LAST_RUN)}` : "");
+});
+
 $("toastClose").addEventListener("click", hideBanner);
 
 $("specPick").addEventListener("change", () => {
@@ -2027,16 +3124,119 @@ for (const [btn, pre, rows] of [["testRaw", "testOut", "testRows"],
     $(btn).textContent = showingRaw ? "Raw log" : "Show rows";
   });
 }
-$("exploreTarget").addEventListener("change", describeTarget);
+$("exploreTarget").addEventListener("change", () => {
+  describeTarget();
+  offerConfigure($("exploreTarget").value, "to explore against");
+});
 $("btnSaveTest").addEventListener("click", openSaveDialog);
 $("btnTestsRefresh").addEventListener("click", loadTests);
 $("btnRunTests").addEventListener("click", () =>
   runTests($("testKind").value ? [$("testKind").value] : []));
 $("btnRunSanity").addEventListener("click", () => runTests(["e2e"]));
-$("btnCI").addEventListener("click", async () => {
-  const { data } = await api("/api/ci");
-  $("testOutCard").hidden = false;
-  $("testOut").textContent = data.snippet || data.error || "";
+/* ------------------------------------------ pipeline and story briefs */
+
+/* Whatever is selected above IS the pipeline: the same flags, so a failure in
+   CI can be reproduced locally by copying one line. */
+function genOpen(kind) {
+  $("genCard").hidden = false;
+  $("genStoryRow").hidden = kind !== "story";
+  $("genPipeRow").hidden = kind !== "pipeline";
+  $("genOut").textContent = "";
+  if (kind === "story") {
+    $("genTitle").textContent = "Tests from a user story";
+    $("genNote").textContent =
+      "This builds a brief: the story, the operations from your spec that look "
+      + "relevant, the house format, and what is already covered. It calls no model "
+      + "— paste it wherever your team already works.";
+    $("genStory").focus();
+  } else {
+    $("genTitle").textContent = "Pipeline for this selection";
+    $("genNote").textContent =
+      "Built from what is selected above, so CI runs exactly what you just ran.";
+  }
+  $("genCard").scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+$("btnPipeline").addEventListener("click", () => genOpen("pipeline"));
+$("btnStory").addEventListener("click", () => genOpen("story"));
+$("genClose").addEventListener("click", () => { $("genCard").hidden = true; });
+$("genCopy").addEventListener("click", () => copyText($("genOut").textContent, $("genCopy")));
+
+$("genPipeGo").addEventListener("click", async () => {
+  const kind = $("testKind").value;
+  const { data } = await api("/api/tests/pipeline", {
+    method: "POST",
+    body: JSON.stringify({
+      env: $("testEnv").value || "mock",
+      levels: pickedValues("testLevels"),
+      modules: pickedValues("testModules"),
+      only: $("testOnly").value.trim() || undefined,
+      kinds: kind ? [kind] : [],
+      drafts: $("testDrafts").checked,
+      format: $("genFormat").value,
+    }),
+  });
+  if (!data.ok) { banner("err", data.error || "could not build a pipeline"); return; }
+  $("genOut").textContent = data.yaml || data.command;
+  $("genMeta").textContent = data.selects !== undefined
+    ? `${data.selects} test(s) — ${data.describes}` : data.describes;
+  $("genNote").textContent = data.filename
+    ? `Save this as ${data.filename}. It runs: ${data.command}`
+    : "Run this wherever you like.";
+});
+
+/* Export is the other half of import: a suite has to be able to leave, or the
+   tool is somewhere tests go to be trapped. The file it writes is the shape
+   import accepts, so it also doubles as the thing you hand an assistant. */
+$("btnExport").addEventListener("click", async () => {
+  const modules = pickedValues("testModules");
+  const one = modules.length === 1 ? modules[0] : null;
+  const q = new URLSearchParams(one ? { suite: one, download: "1" } : { download: "1" });
+  window.location.href = "/api/tests/export?" + q;
+  banner("ok", one
+    ? `Exporting ${one}. The same file imports straight back.`
+    : "Exporting every suite. Select modules above to export just those.");
+});
+
+/* "More like these" is a different question from "here is a story": the house
+   style is already settled and what is missing is coverage, so the brief shows
+   real examples and names the operations nothing touches. */
+$("genMoreGo").addEventListener("click", async () => {
+  const modules = pickedValues("testModules");
+  $("genMoreGo").disabled = true;
+  try {
+    const { data } = await api("/api/tests/more-like", {
+      method: "POST",
+      body: JSON.stringify({ module: modules.length === 1 ? modules[0] : null }),
+    });
+    if (!data.ok) { banner("err", data.error || "could not build the brief"); return; }
+    $("genOut").textContent = data.brief;
+    $("genMeta").textContent = `more like ${data.module}`;
+    $("genNote").textContent =
+      "Paste this wherever your team works. Bring the JSON back through Import — "
+      + "it lands in drafts and still has to pass before it can be promoted.";
+  } finally {
+    $("genMoreGo").disabled = false;
+  }
+});
+
+$("genStoryGo").addEventListener("click", async () => {
+  const story = $("genStory").value.trim();
+  if (story.length < 12) { banner("err", "Give a sentence or two of story."); return; }
+  $("genStoryGo").disabled = true;
+  try {
+    const { data } = await api("/api/tests/story",
+      { method: "POST", body: JSON.stringify({ story }) });
+    if (!data.ok) { banner("err", data.error); return; }
+    $("genOut").textContent = data.brief;
+    $("genMeta").textContent = data.matched ? "operations matched" : "no operation matched";
+    if (!data.matched) {
+      banner("err", "No operation in the spec matched that story — the brief asks for the "
+                  + "endpoints to be named rather than invented.");
+    }
+  } finally {
+    $("genStoryGo").disabled = false;
+  }
 });
 
 $("btnCollection").addEventListener("click", () => {
@@ -2119,7 +3319,10 @@ async function loadEnvironments() {
       <td>${e.ready
         ? '<span class="outcome pass">ready</span>'
         : `<span class="outcome fail">needs ${esc(e.unresolved.join(", "))}</span>`}</td>
-      <td><button class="sm env-config" data-env="${esc(e.name)}">Configure</button></td>
+      <td><button class="sm env-config" data-env="${esc(e.name)}">Configure</button>
+          <button class="sm env-data" data-env="${esc(e.name)}"
+                  title="what a value is on this server — ids, expected counts"
+            >Test data</button></td>
     </tr>
     ${e.description ? `<tr><td></td><td colspan="3" class="hint"
        style="margin:0">${esc(e.description)}</td></tr>` : ""}`).join("")}</table>
@@ -2129,6 +3332,8 @@ async function loadEnvironments() {
       gitignored. Per-environment test data goes in that environment's
       <code>data</code> block.</p>`
     : '<div class="empty">No environments defined.</div>';
+  $("envList").querySelectorAll(".env-data").forEach((b) =>
+    b.addEventListener("click", () => openEnvData(b.dataset.env)));
   $("envList").querySelectorAll(".env-config").forEach((b) =>
     b.addEventListener("click", () => configureEnv(b.dataset.env)));
   sel.innerHTML = '<option value="">— pick one —</option>' + list.map((e) =>

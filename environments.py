@@ -403,6 +403,15 @@ def authenticate(env, verbose=False):
     return headers, "login -> " + ", ".join(note_parts)
 
 
+def is_readonly(name, path=None):
+    """Whether this environment forbids writes. Default false; production is
+    the reason it exists."""
+    try:
+        return bool(get(name, path).get("readonly"))
+    except SystemExit:
+        return False
+
+
 def headers_for(name, path=None, verbose=False):
     """A missing credential is an ordinary, expected situation — report it as a
     sentence, not as a stack trace from three frames down."""

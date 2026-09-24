@@ -32,6 +32,7 @@ Endpoints (all under /api, all same-origin):
 import json
 import os
 import re
+import shlex
 import yaml
 import signal
 import subprocess
@@ -653,7 +654,21 @@ def sample_request():
     path, query = sample_path_and_query(route)
     required = [prm["name"] for prm in (route.get("parameters") or [])
                 if prm.get("in") == "query" and prm.get("required")]
-    return jsonify({"path": path, "query": query, "required_query": required})
+
+    # the body belongs with the rest of the sample: a caller filling a form
+    # wants one answer, not a path from here and a body from somewhere else
+    body = None
+    media = (route["request_body"].get("content") or {}).get("application/json")
+    if media and media.get("schema"):
+        import random
+
+        from generator import generate_from_schema
+        body = generate_from_schema(media["schema"], random.Random(route["key"]),
+                                    array_items=1)
+
+    return jsonify({"path": path, "query": query, "required_query": required,
+                    "body": body, "summary": route.get("summary") or "",
+                    "statuses": sorted(str(c) for c in route["responses"])})
 
 
 @app.get("/api/curl")
@@ -1314,6 +1329,476 @@ def suggest_assertions():
     })
 
 
+@app.get("/api/tests/taxonomy")
+def tests_taxonomy():
+    """What can be selected to run: modules, levels, kinds, with counts —
+    and the types an assertion may name."""
+    import tests as t
+    suites = t.load_suites(include_drafts=request.args.get("drafts") != "0")
+    return jsonify({**t.taxonomy(suites), "types": t.known_types(suites)})
+
+
+def _readonly_target(label):
+    """The mock is always writable; a named environment says for itself."""
+    if not label or label == "mock":
+        return False
+    try:
+        import environments as envmod
+        return envmod.is_readonly(label)
+    except Exception:
+        return False
+
+
+def live_samples(spec, routes, limit=6):
+    """Real responses for a few operations, to put in a brief.
+
+    A schema says what a field is called; a response shows what it looks like.
+    Generated tests are markedly better with both, and the mock can answer for
+    every operation without touching anybody's real server."""
+    if not mock.running:
+        return {}
+    import urllib.request
+    out = {}
+    for route in routes[:limit]:
+        if route["method"] != "GET" or route["path_params"]:
+            continue                       # a read with no ids needed: safe and cheap
+        try:
+            url = mock.base_url().rstrip("/") + route["path"]
+            with urllib.request.urlopen(url, timeout=4) as resp:
+                out[route["key"]] = json.loads(resp.read().decode())
+        except Exception:
+            continue                       # a sample is a bonus, never a blocker
+    return out
+
+
+@app.post("/api/tests/story")
+def tests_story():
+    """A brief for turning a user story into tests, to paste into an assistant.
+
+    Deliberately not a call to any model: whatever a team already uses is the
+    one they are allowed to paste into, and the format of what comes back is
+    checked by the same validator either way."""
+    import tests as t
+    payload = request.get_json(silent=True) or {}
+    story = (payload.get("story") or "").strip()
+    if len(story) < 12:
+        return jsonify({"ok": False, "error": "give a sentence or two of story"}), 400
+    spec_path = project.active_spec(mock.options.get("spec"))
+    spec = None
+    try:
+        from mockd import Source, Spec
+        src = Source(spec_path, poll=0, cache_dir=str(LOG_DIR))
+        text, _ = src.read(force=True)
+        if text:
+            spec = Spec(text=text, origin=spec_path)
+    except Exception:
+        spec = None
+    covered = []
+    for suite in t.load_suites(include_drafts=True):
+        covered += [c.get("id") for c in (suite.get("cases") or [])]
+        covered += [sc.get("id") for sc in (suite.get("scenarios") or [])]
+    # sample exactly the operations the brief will name
+    chosen = t.relevant_routes(spec, story) if spec is not None else []
+    brief = t.story_pack(spec, story, covered, samples=live_samples(spec, chosen))
+    matched = brief.count("\n") and "NO OPERATION MATCHED" not in brief
+    return jsonify({"ok": True, "brief": brief, "matched": bool(matched),
+                    "spec": spec_path})
+
+
+@app.post("/api/tests/more-like")
+def tests_more_like():
+    """A brief asking for more tests in the shape of the ones already written."""
+    import tests as t
+    payload = request.get_json(silent=True) or {}
+    module = (payload.get("module") or "").strip() or None
+    spec_path = project.active_spec(mock.options.get("spec"))
+    spec = None
+    try:
+        from mockd import Source, Spec
+        src = Source(spec_path, poll=0, cache_dir=str(LOG_DIR))
+        text, _ = src.read(force=True)
+        if text:
+            spec = Spec(text=text, origin=spec_path)
+    except Exception:
+        spec = None
+    suites = t.load_suites(include_drafts=True)
+    brief = t.more_like_pack(spec, suites, module,
+                             samples=live_samples(spec,
+                                                  spec.routes if spec is not None else []))
+    return jsonify({"ok": True, "brief": brief, "spec": spec_path,
+                    "module": module or "every module"})
+
+
+@app.post("/api/tests/pipeline")
+def tests_pipeline():
+    """Turn a selection into something CI will run.
+
+    Every selector the console offers is already a flag on `tests.py run`, so
+    this is a formatting problem rather than a second way to run tests — which
+    matters, because a pipeline that runs tests differently from the way you
+    ran them locally is a pipeline whose failures you cannot reproduce."""
+    import tests as t
+    payload = request.get_json(silent=True) or {}
+    env = (payload.get("env") or "mock").strip()
+    levels = [x for x in (payload.get("levels") or []) if x in t.LEVELS]
+    modules = [str(x) for x in (payload.get("modules") or []) if str(x).strip()]
+    kinds = [x for x in (payload.get("kinds") or []) if x in ("case", "api", "e2e")]
+    only = (payload.get("only") or "").strip()
+    fmt = payload.get("format") or "github"
+
+    flags = [f"--env {shlex.quote(env)}"]
+    for level in levels:
+        flags.append(f"--level {level}")
+    for module in modules:
+        flags.append(f"--module {shlex.quote(module)}")
+    for kind in kinds:
+        flags.append(f"--kind {kind}")
+    if only:
+        flags.append(f"--only {shlex.quote(only)}")
+    if payload.get("drafts"):
+        flags.append("--drafts")
+    # three outputs, because three different readers: a CI server renders the
+    # JUnit, a person opens the HTML, a script parses the JSON
+    flags.append("--junit results.xml")
+    flags.append("--html report.html")
+    command = "python tests.py run " + " ".join(flags)
+
+    what = (", ".join(levels) or "every level") + " on " + (", ".join(modules) or "every module")
+    if fmt == "command":
+        return jsonify({"ok": True, "command": command, "describes": what})
+
+    if fmt == "gitlab":
+        text = f"""# {what}, against {env}.
+api-tests:
+  image: python:3.12-slim
+  before_script:
+    - pip install --quiet -r requirements.txt
+  script:
+    - {command}
+  artifacts:
+    when: always
+    paths:
+      - report.html          # open this one
+    reports:
+      junit: results.xml     # GitLab renders this in the pipeline view
+"""
+    else:
+        text = f"""# {what}, against {env}.
+# Values the environment needs come from repository secrets; nothing is baked in.
+name: API tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: {what}
+        env:
+          {env.upper().replace('-', '_')}_BASE_URL: ${{{{ vars.{env.upper().replace('-', '_')}_BASE_URL }}}}
+        run: {command}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: |
+            report.html
+            results.xml
+          if-no-files-found: ignore
+      # the summary a reviewer sees without downloading anything
+      - name: Summary
+        if: always()
+        run: |
+          echo "### API tests — {what} against {env}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Full report in the *test-results* artifact." >> "$GITHUB_STEP_SUMMARY"
+"""
+
+    # how much this selection would actually run, so the answer is not a surprise
+    suites = t.load_suites(include_drafts=bool(payload.get("drafts")))
+    runner = t.Runner.__new__(t.Runner)
+    count = 0
+    for suite in suites:
+        for item in (suite.get("cases") or []):
+            if kinds and "case" not in kinds:
+                continue
+            if runner.selects(item, suite, only or None, None, levels or None,
+                              modules or None):
+                count += 1
+        for item in (suite.get("scenarios") or []):
+            if kinds and item.get("kind", "api") not in kinds:
+                continue
+            if runner.selects(item, suite, only or None, None, levels or None,
+                              modules or None):
+                count += 1
+
+    return jsonify({"ok": True, "yaml": text, "command": command,
+                    "selects": count, "describes": what,
+                    "filename": ".github/workflows/api-tests.yml" if fmt == "github"
+                                else ".gitlab-ci.yml"})
+
+
+@app.get("/api/tests/cleanup-for")
+def cleanup_for():
+    """The route that undoes what a step just created.
+
+    A flow that creates a row on a shared server and walks away leaves that row
+    there for everyone, forever. The spec already knows which endpoint deletes
+    the thing, so the workbench can offer the cleanup step rather than relying
+    on somebody remembering to write one."""
+    created = request.args.get("path") or ""
+    variable = request.args.get("var") or "id"
+    spec_path = project.active_spec(mock.options.get("spec"))
+    try:
+        from mockd import Source, Spec
+        src = Source(spec_path, poll=0, cache_dir=str(LOG_DIR))
+        text, _ = src.read(force=True)
+        spec = Spec(text=text, origin=spec_path)
+    except Exception as exc:
+        return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 400
+
+    # An API may say /departments/{id} or /department/delete/{id}; the mock
+    # already has to treat those as the same resource to keep a stateful store
+    # coherent, so reuse that rather than guess again here.
+    from mockd import _VERB_SUFFIX
+    def resource(path):
+        return _VERB_SUFFIX.sub("", path.split("{", 1)[0].rstrip("/")).rstrip("/")
+
+    stem = resource(created)
+    candidates = []
+    for route in spec.routes:
+        if route["method"] != "DELETE" or len(route["path_params"]) != 1:
+            continue
+        prefix = resource(route["path"])
+        if prefix == stem or prefix.startswith(stem + "/"):
+            candidates.append(route)
+    if not candidates:
+        return jsonify({"found": False,
+                        "why": f"the document declares no DELETE under {stem}"})
+
+    route = min(candidates, key=lambda r: len(r["path"]))
+    name = route["path_params"][0] if isinstance(route["path_params"], list) \
+        else list(route["path_params"])[0]
+    return jsonify({"found": True, "step": {
+        "role": "cleanup",
+        "name": f"remove what this flow created",
+        "request": {"method": "DELETE",
+                    "path": route["path"].replace("{%s}" % name, "{{%s}}" % variable)},
+        "assertions": [{"type": "status", "in": [200, 202, 204, 404]}],
+    }, "operation": route["key"]})
+
+
+RUN_REPORTS = {}
+
+
+@app.get("/api/tests/report.<kind>")
+def download_report(kind):
+    """One run, in the form you need.
+
+    html to read or send to somebody, xml for a CI server that already knows
+    how to render JUnit, json for anything else. `job` picks a specific run;
+    without it you get the most recent, which is only the same thing when
+    nothing else has run in between."""
+    mimetypes = {"html": "text/html", "xml": "application/xml",
+                 "json": "application/json"}
+    if kind not in mimetypes:
+        return jsonify({"error": f"no such report {kind}"}), 404
+    mimetype = mimetypes[kind]
+
+    wanted = request.args.get("job")
+    if wanted:
+        path = LOG_DIR / f"run-{RUN_REPORTS.get(wanted, wanted)}.{kind}"
+        if not path.exists():
+            return jsonify({"error": "that run left no report — it may still be "
+                                     "running, or it failed before finishing"}), 404
+    else:
+        candidates = sorted(LOG_DIR.glob(f"run-*.{kind}"),
+                            key=lambda f: f.stat().st_mtime, reverse=True)
+        legacy = LOG_DIR / f"last_test_run.{kind}"
+        if legacy.exists():
+            candidates.append(legacy)
+        path = candidates[0] if candidates else None
+    if path is None or not path.exists():
+        return jsonify({"error": "nothing has been run yet"}), 404
+    stamp = time.strftime("%Y%m%d-%H%M", time.localtime(path.stat().st_mtime))
+    return Response(path.read_text(), mimetype=mimetype, headers={
+        "Content-Disposition": f'attachment; filename="test-report-{stamp}.{kind}"'})
+
+
+@app.get("/api/tests/values")
+def dynamic_values():
+    """The values that resolve themselves at run time.
+
+    These are how a test stops colliding with its own previous run, and they
+    were discoverable only by reading the source or a placeholder — so nobody
+    used them, and everybody wrote constants."""
+    import tests as t
+    described = {
+        "$uuid": "a fresh id every time it is read — for a name that must be unique",
+        "$runId": "the same for the whole run, different every run — put it in what you "
+                  "create so a run's leftovers can be found",
+        "$timestamp": "seconds since the epoch",
+        "$isoDate": "today, as 2026-09-23",
+        "$isoDateTime": "now, as an ISO timestamp",
+        "$randomInt": "a number between 1 and 100000",
+        "$randomEmail": "an address nobody owns, on example.com",
+    }
+    out = []
+    for name in t._BUILTINS:
+        out.append({"name": name, "about": described.get(name, ""),
+                    "example": str(t._BUILTINS[name]())[:48]})
+    return jsonify({"values": out})
+
+
+@app.post("/api/tests/compare-envs")
+def compare_envs():
+    """Run the same flow against two servers and say what would not survive.
+
+    A flow built against the mock binds what the mock invented. Finding out on
+    the day of a release that the real server calls it something else is the
+    expensive way; running it against both while you are still writing it is
+    the cheap one."""
+    import tests as t
+    payload = request.get_json(silent=True) or {}
+    steps = payload.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return jsonify({"ok": False, "error": "no steps to run"}), 400
+    here_name = payload.get("here") or "mock"
+    there_name = payload.get("there")
+    if not there_name or there_name == here_name:
+        return jsonify({"ok": False, "error": "choose a second, different environment"}), 400
+
+    outcomes = {}
+    for label in (here_name, there_name):
+        if _readonly_target(label) and any(
+                str((st.get("request") or st).get("method", "GET")).upper()
+                in t.WRITE_METHODS for st in steps):
+            return jsonify({"ok": False, "readonly": True,
+                            "error": f"{label} is read-only and this flow writes, so it "
+                                     f"cannot be compared there"}), 200
+        name, base, headers, problem = resolve_target(label)
+        if problem:
+            return jsonify({"ok": False, "error": f"{label}: {problem}"}), 200
+        runner = t.Runner(base, headers, spec=None, timeout=30,
+                          readonly=_readonly_target(label), env_name=label)
+        scenario = {"id": "compare", "kind": "e2e", "name": "comparison",
+                    "steps": steps, "data": payload.get("data") or {}}
+        try:
+            outcomes[label] = runner.run_scenario(scenario, payload.get("data") or {})
+        except SystemExit as exc:
+            return jsonify({"ok": False, "error": f"{label}: {exc}"}), 200
+
+    per_step = []
+    for index in range(len(steps)):
+        a = (outcomes[here_name]["steps"] or [])[index:index + 1]
+        b = (outcomes[there_name]["steps"] or [])[index:index + 1]
+        if not a or not b:
+            continue
+        diff = t.compare_shapes(a[0].get("response_json"), b[0].get("response_json"),
+                                "a", "b")
+        per_step.append({
+            "step": index + 1, "name": a[0].get("name"),
+            "status": {here_name: a[0].get("status"), there_name: b[0].get("status")},
+            "outcome": {here_name: a[0].get("outcome"), there_name: b[0].get("outcome")},
+            "same_shape": diff["same"],
+            "only_here": diff["only_on_a"], "only_there": diff["only_on_b"],
+            "different_type": [{"path": d["path"], here_name: d["a"], there_name: d["b"]}
+                               for d in diff["different_type"]],
+        })
+
+    last = outcomes[there_name]["steps"] or []
+    shape_there = {}
+    for step in last:
+        shape_there.update(t.shape_of(step.get("response_json")))
+    at_risk = t.bindings_at_risk(steps, shape_there)
+
+    return jsonify({"ok": True, "here": here_name, "there": there_name,
+                    "steps": per_step, "at_risk": at_risk,
+                    "verdict": ("nothing this flow depends on is missing"
+                                if not at_risk else
+                                f"{len(at_risk)} thing(s) this flow depends on are not "
+                                f"in {there_name}'s responses")})
+
+
+@app.post("/api/tests/chain")
+def tests_chain():
+    """Run a flow up to a point and hand back every step's real response.
+
+    This is what makes the workbench a workbench rather than a form: you cannot
+    bind a value you have never seen. Steps after `upto` are not run, so a
+    half-built flow can be exercised without its unfinished tail failing."""
+    import tests as t
+    payload = request.get_json(silent=True) or {}
+    steps = payload.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return jsonify({"error": "no steps to run"}), 400
+    upto = payload.get("upto")
+    upto = len(steps) if upto is None else max(0, min(int(upto) + 1, len(steps)))
+
+    # Refuse before resolving anything. Whether a read-only server's credentials
+    # happen to be set is beside the point, and reporting the missing variable
+    # first would hide the reason that actually matters.
+    target_name = payload.get("target")
+    if _readonly_target(target_name):
+        writes = [st for st in steps[:upto]
+                  if str((st.get("request") or st).get("method", "GET")).upper()
+                  in t.WRITE_METHODS]
+        if writes:
+            names = ", ".join(sorted({str((w.get("request") or w).get("method")).upper()
+                                      for w in writes}))
+            return jsonify({"ok": False, "readonly": True, "target": target_name,
+                            "error": f"{target_name} is read-only, so this flow cannot run "
+                                     f"there: it uses {names}. Point it at a server where "
+                                     f"writing is safe, or run only the read steps."}), 200
+
+    label, base, auth_headers, problem = resolve_target(target_name)
+    if problem:
+        return jsonify({"error": problem}), 409
+
+    scenario = {"id": payload.get("id") or "workbench", "kind": payload.get("kind", "api"),
+                "name": payload.get("name") or "workbench flow",
+                "steps": steps[:upto], "data": payload.get("data") or {}}
+    problems = t.validate_test(scenario, kind="scenario")
+    if problems:
+        return jsonify({"ok": False, "errors": problems}), 200
+
+    readonly = _readonly_target(label)
+    runner = t.Runner(base, auth_headers, spec=None, timeout=30,
+                      readonly=readonly, env_name=label)
+    try:
+        outcome = runner.run_scenario(scenario, payload.get("data") or {})
+    except SystemExit as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 200
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 200
+    # A workbench run counts as a run of the saved test only when what ran IS
+    # the saved test: same flow, every step, nothing edited since it was
+    # loaded. Recording an experiment as a pass would put a green badge on a
+    # test nobody has actually run.
+    recorded = None
+    record = payload.get("record") or {}
+    whole = upto >= len(steps)
+    if record.get("suite") and record.get("id") and whole:
+        try:
+            t.record_history([(record["suite"], [{**outcome, "id": record["id"]}])],
+                             base, label, None)
+            recorded = f"{record['suite']}/{record['id']}"
+        except Exception:
+            recorded = None
+
+    return jsonify({"ok": True, "target": label, "base_url": base,
+                    "ran": upto, "of": len(steps), "result": outcome,
+                    "recorded": recorded})
+
+
 @app.post("/api/tests/try")
 def try_test():
     """Run a test definition that has not been saved yet.
@@ -1346,7 +1831,8 @@ def try_test():
         return jsonify({"error": problem}), 409
 
     spec = _spec_for_tests()
-    runner = t.Runner(base, auth_headers or {}, spec, timeout=30)
+    runner = t.Runner(base, auth_headers or {}, spec, timeout=30,
+                      readonly=_readonly_target(label), env_name=label)
     data = t.interpolate(data, {}, strict=False)
     try:
         if body.get("steps"):
@@ -1358,6 +1844,45 @@ def try_test():
     outcome["target"] = label
     outcome["base_url"] = base
     return jsonify({"ok": True, "result": outcome})
+
+
+@app.post("/api/tests/save-flow")
+def save_flow():
+    """Write a whole scenario at once.
+
+    /api/tests/save appends one step at a time, which is right when a flow is
+    grown from the explorer. The workbench holds the entire flow, so writing it
+    step by step would leave a half-saved scenario on disk if anything failed."""
+    import tests as t
+    payload = request.get_json(silent=True) or {}
+    suite_name = (payload.get("suite") or "").strip()
+    if not suite_name or not re.fullmatch(r"[A-Za-z0-9._-]+", suite_name):
+        return jsonify({"ok": False, "error": "module must be a simple name"}), 400
+    flow = payload.get("flow")
+    if not isinstance(flow, dict):
+        return jsonify({"ok": False, "error": "no flow to save"}), 400
+
+    problems = t.validate_test(flow, kind="scenario")
+    if problems:
+        return jsonify({"ok": False, "errors": problems}), 200
+
+    stage = payload.get("stage") or "draft"
+    suites = {s["name"]: s for s in t.load_suites(include_drafts=True)
+              if s.get("_stage") == stage}
+    suite = suites.get(suite_name) or {"name": suite_name, "module": suite_name,
+                                       "data": {}, "cases": [], "scenarios": [],
+                                       "_stage": stage}
+    suite.setdefault("scenarios", [])
+    suite.setdefault("cases", [])
+    suite.setdefault("module", suite_name)
+    # replacing by id, so saving twice edits rather than duplicates
+    suite["scenarios"] = [sc for sc in suite["scenarios"] if sc.get("id") != flow.get("id")]
+    suite["scenarios"].append(flow)
+
+    path = t.save_suite(suite, stage=stage)
+    return jsonify({"ok": True, "file": str(path), "suite": suite_name, "stage": stage,
+                    "steps": len(flow.get("steps") or []),
+                    "scenarios": len(suite["scenarios"])})
 
 
 @app.post("/api/tests/save")
@@ -1435,6 +1960,43 @@ def update_test():
         suite["data"] = payload["data"]
     path = t.save_suite(suite, stage=suite.get("_stage"))
     return jsonify({"ok": True, "file": str(path)})
+
+
+@app.get("/api/tests/export")
+def export_tests():
+    """Everything, or one suite, as JSON you can hand to anyone.
+
+    The same shape `/api/tests/import` accepts, so a suite exported here goes
+    back in — to another checkout, to a colleague, or to an assistant asked to
+    write more like these. A format that only travels one way is a format that
+    strands people."""
+    import tests as t
+    wanted = request.args.get("suite")
+    stage = request.args.get("stage")
+    include_drafts = request.args.get("drafts") != "0"
+    suites = t.load_suites(include_drafts=include_drafts)
+    out = []
+    for suite in suites:
+        if wanted and suite.get("name") != wanted:
+            continue
+        if stage and suite.get("_stage") != stage:
+            continue
+        out.append({k: v for k, v in suite.items() if not k.startswith("_")})
+
+    doc = {
+        "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "spec": project.active_spec(),
+        "suites": out,
+        "_how": "Import with the Tests view's Import button, or "
+                "`python tests.py import --file <this file> --suite <name>`. "
+                "Tests land as drafts and are checked on the way in.",
+    }
+    if request.args.get("download"):
+        name = f"tests-{wanted or 'all'}-{time.strftime('%Y%m%d')}.json"
+        return Response(json.dumps(doc, indent=2),
+                        mimetype="application/json",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
+    return jsonify(doc)
 
 
 @app.post("/api/tests/import")
@@ -1555,10 +2117,22 @@ def run_tests():
         cmd += ["--kind", kind]
     for tag in (payload.get("tags") or []):
         cmd += ["--tag", tag]
+    for level in (payload.get("levels") or []):
+        cmd += ["--level", level]
+    for module in (payload.get("modules") or []):
+        cmd += ["--module", module]
     if payload.get("verbose"):
         cmd += ["--verbose"]
-    cmd += ["--json", str(LOG_DIR / "last_test_run.json")]
-    return jsonify({"job": start_job(cmd, timeout=900)})
+    # One file per run, named after the job. A single shared "last run" meant
+    # two runs — two tabs, two people, a test suite in the background — silently
+    # overwrote each other, and you downloaded somebody else's results believing
+    # they were yours.
+    job = uuid.uuid4().hex[:12]
+    for flag, ext in (("--json", "json"), ("--html", "html"), ("--junit", "xml")):
+        cmd += [flag, str(LOG_DIR / f"run-{job}.{ext}")]
+    started = start_job(cmd, timeout=900)
+    RUN_REPORTS[started] = job
+    return jsonify({"job": started, "report": job})
 
 
 @app.get("/api/ci")
@@ -1597,6 +2171,160 @@ def list_environments():
             "ready": not missing,
         })
     return jsonify({"environments": out})
+
+
+@app.get("/api/environments/<name>/data")
+def environment_data(name):
+    """The test data that belongs to one environment.
+
+    A suite's `data` says what a value MEANS; an environment's says what it IS
+    on that server — the id of a row that exists on staging is not the id of
+    one on dev, and 250 countries on production is 2 on the mock. Without an
+    editor this was a file-editing job, which meant per-environment
+    expectations existed in theory and nowhere else."""
+    import environments as envmod
+    envs = envmod.load()
+    if name not in envs:
+        return jsonify({"error": f"no environment named {name}"}), 404
+    raw = (envs[name].get("data") or {})
+    rows = []
+    for key, value in raw.items():
+        literal = not (isinstance(value, str) and re.fullmatch(r"\$\{\w+\}", value.strip()))
+        rows.append({"name": key, "value": value, "literal": literal,
+                     "resolved": envmod.resolve(value, []) if not literal else value})
+    return jsonify({"environment": name, "data": sorted(rows, key=lambda r: r["name"]),
+                    "writes_to": "environments.json (committed)",
+                    "note": "Values here are committed. Anything sensitive — a real row "
+                            "id, a customer reference — should be written as ${VAR} and "
+                            "set in .env instead."})
+
+
+@app.post("/api/environments/<name>/data")
+def set_environment_data(name):
+    """Replace one environment's data block."""
+    import environments as envmod
+    payload = request.get_json(silent=True) or {}
+    rows = payload.get("data")
+    if not isinstance(rows, list):
+        return jsonify({"ok": False, "error": "data must be a list of {name, value}"}), 400
+
+    doc = json.loads(envmod.DEFAULT_FILE.read_text())
+    if name not in (doc.get("environments") or {}):
+        return jsonify({"ok": False, "error": f"no environment named {name}"}), 404
+
+    secrets = []
+    data = {}
+    for row in rows:
+        key = str(row.get("name") or "").strip()
+        if not key or not re.fullmatch(r"\w+", key):
+            continue
+        value = row.get("value")
+        if row.get("secret"):
+            # keep it out of the committed file: the name goes here, the value
+            # goes to .env, which is gitignored
+            var = f"{re.sub(r'[^A-Z0-9]+', '_', name.upper())}_{key.upper()}"
+            data[key] = f"${{{var}}}"
+            if value not in (None, ""):
+                secrets.append((var, str(value)))
+        else:
+            data[key] = _coerce(value)
+
+    doc["environments"][name]["data"] = data
+    envmod.DEFAULT_FILE.write_text(json.dumps(doc, indent=2) + "\n")
+    if secrets:
+        envmod.write_dotenv(dict(secrets))
+    return jsonify({"ok": True, "environment": name, "count": len(data),
+                    "kept_out_of_git": [v for v, _ in secrets],
+                    "message": f"{len(data)} value(s) saved for {name}"
+                               + (f"; {len(secrets)} written to .env instead of the "
+                                  f"committed file" if secrets else "")})
+
+
+def _coerce(value):
+    """"250" typed into a form is the number 250 — an assertion comparing it
+    with a real count should not fail on the quotes."""
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if re.fullmatch(r"-?\d+", text):
+        return int(text)
+    if re.fullmatch(r"-?\d*\.\d+", text):
+        return float(text)
+    if text.lower() in ("true", "false"):
+        return text.lower() == "true"
+    return value
+
+
+@app.post("/api/environments/create")
+def create_environment():
+    """Add a named target without hand-editing a file.
+
+    What gets written is the SHAPE of the environment — its base URL and how it
+    authenticates, expressed as ${VAR} placeholders. The values go to .env
+    through the existing vars flow, so a URL or a password typed here still
+    cannot reach a commit."""
+    import environments as envmod
+    payload = request.get_json(silent=True) or {}
+    name = (payload.get("name") or "").strip()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,40}", name or ""):
+        return jsonify({"ok": False, "error": "a name may use lower-case letters, "
+                                              "digits, dot, dash and underscore"}), 400
+
+    existing = envmod.load()
+    if name in existing and not payload.get("replace"):
+        return jsonify({"ok": False, "error": f"{name} already exists"}), 409
+
+    prefix = re.sub(r"[^A-Z0-9]+", "_", name.upper()).strip("_") or "ENV"
+    mode = payload.get("mode") or "none"
+    if mode not in ("none", "token", "login", "cookie"):
+        return jsonify({"ok": False, "error": f"unknown auth mode {mode}"}), 400
+
+    env = {"description": (payload.get("description") or "").strip()
+                          or f"{name}, added from the console",
+           "base_url": f"${{{prefix}_BASE_URL}}"}
+    if payload.get("readonly"):
+        env["readonly"] = True
+    if mode == "token":
+        env["auth"] = {"mode": "token", "token": f"${{{prefix}_TOKEN}}"}
+    elif mode == "cookie":
+        env["auth"] = {"mode": "none"}
+        env["headers"] = {"Cookie": f"${{{prefix}_COOKIE}}"}
+    elif mode == "login":
+        env["auth"] = {"mode": "login", "login": {
+            "method": "POST", "path": payload.get("login_path") or "/api/v1/auth/login",
+            "send": payload.get("login_send") or "json",
+            "username_field": "username", "password_field": "password",
+            "username": f"${{{prefix}_USERNAME}}", "password": f"${{{prefix}_PASSWORD}}",
+            "use_cookies": True}}
+    else:
+        env["auth"] = {"mode": "none"}
+    env["data"] = {}
+
+    doc = json.loads(envmod.DEFAULT_FILE.read_text()) if envmod.DEFAULT_FILE.exists() \
+        else {"environments": {}}
+    doc.setdefault("environments", {})[name] = env
+    envmod.DEFAULT_FILE.write_text(json.dumps(doc, indent=2) + "\n")
+
+    missing = []
+    envmod.resolve(env, missing)
+    return jsonify({"ok": True, "name": name, "environment": env,
+                    "needs": sorted(set(missing)),
+                    "message": f"{name} added to environments.json — it holds only "
+                               f"${{VAR}} placeholders, so it is safe to commit. "
+                               f"Set its values with Configure."})
+
+
+@app.post("/api/environments/delete")
+def delete_environment():
+    """Remove an environment this console added."""
+    import environments as envmod
+    name = (request.get_json(silent=True) or {}).get("name")
+    doc = json.loads(envmod.DEFAULT_FILE.read_text())
+    if name not in (doc.get("environments") or {}):
+        return jsonify({"ok": False, "error": f"no environment named {name}"}), 404
+    doc["environments"].pop(name)
+    envmod.DEFAULT_FILE.write_text(json.dumps(doc, indent=2) + "\n")
+    return jsonify({"ok": True, "message": f"{name} removed"})
 
 
 @app.get("/api/environments/<name>/vars")

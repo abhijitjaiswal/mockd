@@ -381,12 +381,20 @@ class Overlay:
     def __init__(self, path=None, text=None):
         self.operations = {}
         self.path = path
+        # Where a curated body contradicts the document it is supposed to
+        # illustrate. Worth surfacing: it means the overlay outlived the spec
+        # it was generated from, and anything built against it learned a shape
+        # the real server does not return.
+        self.conflicts = {}
         raw = text
         if raw is None and path and Path(path).exists():
             raw = Path(path).read_text()
         if raw:
             doc = json.loads(raw)
             self.operations = doc.get("operations", doc)
+
+    def note_conflict(self, key, status, why):
+        self.conflicts.setdefault(f"{key} [{status}]", why)
 
     def get(self, key, status=None, scenario=None):
         entry = self.operations.get(key)
@@ -414,6 +422,25 @@ def _success_status(responses):
     if "default" in responses:
         return "default"
     return sorted(codes, key=int)[0] if codes else None
+
+
+def _overlay_conflict(schema, body, spec=None):
+    """None when a curated body agrees with the declared schema, else why not.
+
+    Only checked when the document actually declares something: most of this
+    spec declares nothing, and an overlay is the only answer there is."""
+    if not schema or body is None:
+        return None
+    try:
+        resolved = spec.resolve(schema) if spec is not None else schema
+        errors = list(_Validator(resolved).iter_errors(body))
+    except Exception:
+        return None                        # cannot judge: do not interfere
+    if not errors:
+        return None
+    first = errors[0]
+    where = ".".join(str(p) for p in first.absolute_path) or "the body"
+    return f"{where}: {first.message[:140]}"
 
 
 def pick_response(route, overlay: Overlay, forced_status=None, example_name=None,
@@ -464,7 +491,16 @@ def pick_response(route, overlay: Overlay, forced_status=None, example_name=None
 
     ov_code, ov_body = overlay.get(route["key"], status)
     if ov_code is not None and not nulls:
-        return ov_code, ov_body, "overlay"
+        # An overlay entry is a curated answer, not a licence to contradict the
+        # document. These are generated once and then outlive the spec they
+        # came from: this one paginated a list the document declares as a bare
+        # array, so every test written against the mock learned the wrong path.
+        # The document wins, and the disagreement is reported rather than
+        # silently served.
+        conflict = _overlay_conflict(content.get("schema"), ov_body, spec)
+        if conflict is None:
+            return ov_code, ov_body, "overlay"
+        overlay.note_conflict(route["key"], status, conflict)
 
     # X-Mock-Nulls has to generate: a stored example is a fixed document and
     # cannot show the caller what a null-heavy payload looks like.
@@ -474,7 +510,8 @@ def pick_response(route, overlay: Overlay, forced_status=None, example_name=None
         if body is not None:
             return code, synth.normalise_envelope(body, code, resp.get("description")), \
                    "generated:nulls"
-    if ov_code is not None:
+    if ov_code is not None and _overlay_conflict(content.get("schema"), ov_body,
+                                                spec) is None:
         return ov_code, ov_body, "overlay"
 
     if "example" in content:
@@ -1287,6 +1324,7 @@ class SpecWatcher:
             "synthesized_operations": synthesized,
             "uncurated": uncurated,
             "overlay_entries_no_longer_in_spec": stale,
+            "overlay_entries_contradicting_the_spec": self.overlay.conflicts,
             "spec_error": self.error,
         }
 

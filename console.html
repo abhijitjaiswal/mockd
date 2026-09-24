@@ -104,10 +104,42 @@
   .pill.on{color:var(--ok)} .pill.off{color:var(--muted)}
   .banner{padding:10px 14px;font-size:12.5px;border-bottom:1px solid var(--line)}
   .banner.err{color:var(--err)} .banner.ok{color:var(--ok)}
+  /* A caution is not a failure. Red said "something went wrong" for a note
+     that is only telling you where the requests are about to go. */
+  .banner.warn{color:var(--warn)}
 
   /* Sits above every view, so a message never lands on a page you are not on. */
-  /* an author display: beats the UA's [hidden] rule, so say it explicitly */
-  #toast[hidden]{display:none}
+  /* Any author `display` beats the browser's [hidden] rule, so an element with
+     display:flex stays visible when hidden is set — which has now caught two
+     panels. Say it once, for everything. */
+  /* --- workbench ------------------------------------------------------ */
+  .wbstep{border:1px solid var(--line);border-radius:8px;margin:10px 0;overflow:hidden}
+  .wbstep>header{display:flex;gap:8px;align-items:center;padding:7px 10px;
+       background:var(--code);border-bottom:1px solid var(--line);font-size:12.5px}
+  .wbstep>header .n{font-weight:700;min-width:18px;color:var(--dim)}
+  .wbstep .inner{padding:10px}
+  .wbstep.ran-pass>header{box-shadow:inset 3px 0 0 var(--ok)}
+  .wbstep.ran-fail>header{box-shadow:inset 3px 0 0 var(--err)}
+  .wbwire{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;margin-top:8px}
+  .wbwire b{font-weight:600;color:var(--dim);margin-right:5px}
+  .wbchip{display:inline-block;border:1px solid var(--line);border-radius:12px;
+       padding:1px 8px;margin:2px 3px 2px 0;font-family:ui-monospace,Menlo,monospace;
+       font-size:11.5px}
+  .wbchip.out{border-color:var(--ok);color:var(--ok)}
+  .wbchip.in{border-color:var(--accent);color:var(--accent)}
+  .wbchip.missing{border-color:var(--err);color:var(--err)}
+  .wbfield{display:flex;gap:9px;align-items:center;padding:3px 6px;border-radius:5px;
+       font-size:12px;cursor:pointer;font-family:ui-monospace,Menlo,monospace}
+  .wbfield:hover{background:var(--code)}
+  .wbfield .p{min-width:180px}
+  .wbfield .v{flex:1;color:var(--dim);overflow:hidden;text-overflow:ellipsis;
+       white-space:nowrap}
+  .wbfield .id{color:var(--ok);font-weight:700;font-size:10px}
+  .suite > header.tfold:hover{background:var(--code)}
+  .suite > header .fold{width:12px;color:var(--dim);font-size:11px}
+  .tpage{display:flex;gap:10px;align-items:center;justify-content:center;
+         padding:8px;border-top:1px solid var(--line)}
+  [hidden]{display:none !important}
   #toast{position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:60;
          max-width:min(720px,calc(100vw - 32px));display:flex;gap:10px;align-items:flex-start;
          padding:10px 12px;border:1px solid var(--line);border-radius:8px;
@@ -359,6 +391,8 @@
 </nav>
 
 <!-- Feedback belongs to the app, not to one view: every view fires banner(). -->
+<datalist id="typeList"></datalist>
+
 <div id="toast" role="status" aria-live="polite" hidden>
   <span id="toastText"></span>
   <button id="toastClose" aria-label="Dismiss">&times;</button>
@@ -668,6 +702,78 @@
          run. No URL or token lives in a test; everything that changes between servers is a
          variable.</p>
     </header>
+    <!-- ---------------------------------------------------- WORKBENCH -->
+    <div class="card" id="wbCard">
+      <h3>Workbench <span class="grow"></span>
+        <span class="tag" id="wbTarget"></span>
+        <button class="sm" id="wbToggle">Open</button></h3>
+      <div class="body" id="wbBody" hidden>
+        <p class="hint" style="margin-top:0">Build a flow one step at a time. Run a step,
+          click a value in what came back, and it becomes a variable the next step can use —
+          so a flow that needs data to exist first is assembled from real responses rather
+          than from guesses about field names.</p>
+
+        <div class="row">
+          <div><label for="wbEnv">Run against</label><select id="wbEnv"></select></div>
+          <div><label for="wbKind">Flow kind</label>
+            <select id="wbKind">
+              <option value="api">api — setup steps, then the one under test</option>
+              <option value="e2e">e2e — every step is the point</option>
+            </select></div>
+          <div><label for="wbModule">Module</label>
+            <input type="text" id="wbModule" list="wbModules" placeholder="departments">
+            <datalist id="wbModules"></datalist></div>
+          <div><label for="wbLevel">Level</label><select id="wbLevel"></select></div>
+        </div>
+        <div id="wbLiveWarn" class="banner err" hidden></div>
+
+        <div id="wbSteps"></div>
+
+        <div class="btnrow">
+          <button class="sm" id="wbAdd">Add a step</button>
+          <button class="sm" id="wbRunAll">Run the whole flow</button>
+          <span class="grow"></span>
+          <input type="text" id="wbId" placeholder="flow id, e.g. level-needs-a-department"
+                 style="width:auto;min-width:230px">
+          <button class="primary" id="wbSave">Save as a flow</button>
+        </div>
+        <p class="hint" id="wbSaveNote"></p>
+      </div>
+    </div>
+
+    <!-- ------------------------------------ PIPELINE / STORY output -->
+    <div class="card" id="genCard" hidden>
+      <h3><span id="genTitle">Generated</span> <span class="grow"></span>
+        <span class="tag" id="genMeta"></span>
+        <button class="sm" id="genCopy">Copy</button>
+        <button class="sm" id="genClose">Close</button></h3>
+      <div class="body">
+        <p class="hint" id="genNote" style="margin-top:0"></p>
+        <div id="genStoryRow" hidden>
+          <label for="genStory">The story</label>
+          <textarea id="genStory" rows="3"
+            placeholder="As a recruiter I want to create a department and add approval levels to it, so that requisitions follow the right chain."></textarea>
+          <div class="btnrow">
+            <button class="primary" id="genStoryGo">Build the brief</button>
+          <button class="sm" id="genMoreGo">Or: more like the tests I already have</button>
+            <span class="hint">Paste it into whatever assistant your team uses, then bring
+              the JSON back through Import — it is checked the same either way.</span>
+          </div>
+        </div>
+        <div class="row" id="genPipeRow" hidden>
+          <div><label for="genFormat">For</label>
+            <select id="genFormat">
+              <option value="github">GitHub Actions</option>
+              <option value="gitlab">GitLab CI</option>
+              <option value="command">just the command</option>
+            </select></div>
+          <div style="align-self:end">
+            <button class="primary" id="genPipeGo">Generate</button></div>
+        </div>
+        <pre id="genOut" style="max-height:420px;overflow:auto"></pre>
+      </div>
+    </div>
+
     <div class="cols">
       <div class="sticky">
         <div class="card">
@@ -675,6 +781,14 @@
           <div class="body">
             <label for="testEnv">Against</label>
             <select id="testEnv"></select>
+            <label for="testLevels">How far — pick none for everything</label>
+            <select id="testLevels" multiple size="5"
+                    title="hold Cmd or Ctrl to choose several"></select>
+            <label for="testModules">Which modules — none means all</label>
+            <select id="testModules" multiple size="4"></select>
+            <label for="testOnly">Or a single test, by id or name</label>
+            <input type="text" id="testOnly"
+                   placeholder="departments-list — a regex also works">
             <label for="testKind">Which</label>
             <select id="testKind">
               <option value="">everything</option>
@@ -695,7 +809,9 @@
             <p class="hint" id="testElapsed" style="margin:0"></p>
             <div class="btnrow">
               <button class="sm" id="btnImport">Import / paste…</button>
-              <button class="sm" id="btnCI">CI snippet</button>
+              <button class="sm" id="btnExport">Export…</button>
+              <button class="sm" id="btnPipeline">Pipeline…</button>
+              <button class="sm" id="btnStory">From a story…</button>
               <button class="sm" id="btnTestsRefresh">Refresh</button>
             </div>
           </div>
@@ -714,9 +830,11 @@
         <div class="card" id="testOutCard" hidden>
           <h3>Result <span class="grow"></span>
             <span class="tag" id="testProgress"></span>
-            <button class="sm" id="testRaw">Raw log</button></h3>
+            <button class="sm" id="testReport">Download report</button>
+          <button class="sm" id="testRaw">Raw log</button></h3>
           <div id="testOutHead" class="banner" hidden></div>
           <div id="testRows" class="runrows"></div>
+        <div id="testVerdicts" class="body" hidden></div>
           <pre id="testOut" hidden></pre>
         </div>
       </div>
@@ -732,8 +850,69 @@
          never live in it.</p>
     </header>
     <div class="card">
-      <h3>Defined environments</h3>
+      <h3>Defined environments <span class="grow"></span>
+        <button class="sm" id="btnEnvNew">Add an environment</button></h3>
       <div class="body" id="envList"><span class="hint">Loading…</span></div>
+    </div>
+
+    <div class="card" id="envDataCard" hidden>
+      <h3>Test data for <span id="envDataName"></span> <span class="grow"></span>
+        <button class="sm" id="envDataClose">Close</button></h3>
+      <div class="body">
+        <p class="hint" style="margin-top:0">What a value <b>is</b> on this server. A suite
+          says <code>{{expectedCountries}}</code> once; each environment says what that
+          number is here — so one test holds everywhere instead of one test per server.
+          Saved to <code>environments.json</code>, which is committed. Tick
+          <b>keep out of git</b> for anything sensitive and it is written to
+          <code>.env</code> instead, leaving a <code>${VAR}</code> behind.</p>
+        <div id="envDataRows"></div>
+        <div class="btnrow">
+          <button class="sm" id="envDataAdd">Add a value</button>
+          <span class="grow"></span>
+          <button class="primary" id="envDataSave">Save</button>
+        </div>
+        <p class="hint" id="envDataNote"></p>
+      </div>
+    </div>
+
+    <div class="card" id="envNewCard" hidden>
+      <h3>Add an environment</h3>
+      <div class="body">
+        <p class="hint" style="margin-top:0">This writes the <b>shape</b> of the
+          environment — its address and how it authenticates — as
+          <code>${VAR}</code> placeholders in the committed
+          <code>environments.json</code>. The values go to the gitignored
+          <code>.env</code>, so a URL or password typed here cannot reach a commit.</p>
+        <div class="row">
+          <div><label for="envNewName">Name</label>
+            <input type="text" id="envNewName" placeholder="prod, qa, perf…"></div>
+          <div style="flex:1"><label for="envNewDesc">What it is</label>
+            <input type="text" id="envNewDesc"
+                   placeholder="Production — reads only"></div>
+        </div>
+        <div class="row">
+          <div style="flex:1"><label for="envNewMode">How it authenticates</label>
+            <select id="envNewMode">
+              <option value="none">nothing — open, or auth added per request</option>
+              <option value="cookie">a cookie copied from the browser</option>
+              <option value="token">a token issued out of band</option>
+              <option value="login">log in each run, keeping the cookie jar</option>
+            </select></div>
+          <div style="flex:1" id="envNewLoginWrap" hidden>
+            <label for="envNewLoginPath">Login route</label>
+            <input type="text" id="envNewLoginPath" placeholder="/api/v1/auth/login"></div>
+        </div>
+        <label style="font-weight:400">
+          <input type="checkbox" id="envNewReadonly"> read-only — refuse every
+          POST, PUT, PATCH and DELETE against this server</label>
+        <p class="hint">Tick this for production. It is enforced by the runner, so no
+          suite can write there by accident.</p>
+        <div class="btnrow">
+          <button class="primary" id="envNewSave">Create</button>
+          <button class="sm" id="envNewCancel">Cancel</button>
+        </div>
+        <p class="hint" id="envNewNote"></p>
+      </div>
     </div>
     <div class="card">
       <h3>Check a real environment</h3>

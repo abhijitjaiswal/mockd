@@ -71,7 +71,13 @@ _BUILTINS = {
     "$isoDateTime": lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     "$randomInt": lambda: str(random.randint(1, 100000)),
     "$randomEmail": lambda: f"qa+{uuid.uuid4().hex[:8]}@example.com",
+    # Stable for the whole run, different every run. $uuid gives a fresh value
+    # every time it is read, which is wrong when two steps must agree on the
+    # same name — and it leaves nothing to identify a run's leftovers by.
+    "$runId": lambda: RUN_ID,
 }
+
+RUN_ID = f"run-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
 
 _VAR = re.compile(r"\{\{\s*([^}\s]+)\s*\}\}")
 
@@ -134,7 +140,10 @@ MISSING = object()
 
 def dig(payload, path):
     """'data.items[0].id' out of a response. Returns MISSING when absent, which
-    is different from a field that is present and null."""
+    is different from a field that is present and null.
+
+    `.length` on a list is understood, because that is what `bindable` offers
+    for a list — "how many came back" is usually the thing worth asserting."""
     node = payload
     if path in ("", "$", "."):
         return node
@@ -146,6 +155,9 @@ def dig(payload, path):
             return MISSING
         key, indexes = match.group(1), re.findall(r"\[(\d+)\]", match.group(2))
         if key:
+            if key == "length" and isinstance(node, list):
+                node = len(node)
+                continue
             if not isinstance(node, dict) or key not in node:
                 return MISSING
             node = node[key]
@@ -161,8 +173,22 @@ def dig(payload, path):
 # ----------------------------------------------------------------------------
 
 
+# Operators whose whole job is to talk about absence. Every other one is being
+# handed a value that is not there, and should say so rather than print the
+# sentinel — "got <object object at 0x104311020>" is the tool leaking its own
+# internals at the exact moment somebody needs an answer.
+def _show(value):
+    """A value as a person should read it — never the sentinel's repr."""
+    return "nothing" if value is MISSING else repr(value)
+
+
+ABSENCE_OPS = ("exists", "not_exists", "is_null", "not_null")
+
+
 def _compare(op, actual, expected):
     """Returns (ok, explanation-if-not)."""
+    if actual is MISSING and op not in ABSENCE_OPS:
+        return False, "there is nothing at that path"
     try:
         if op in ("equals", "eq"):
             return actual == expected, f"expected {expected!r}, got {actual!r}"
@@ -171,21 +197,41 @@ def _compare(op, actual, expected):
         if op == "exists":
             return actual is not MISSING, "not present in the response"
         if op == "not_exists":
-            return actual is MISSING, f"present, with value {actual!r}"
+            return actual is MISSING, f"present, with value {_show(actual)}"
         if op == "is_null":
-            return actual is None, f"expected null, got {actual!r}"
+            return actual is None, f"expected null, got {_show(actual)}"
         if op == "not_null":
             return actual is not None and actual is not MISSING, "is null or missing"
         if op == "type":
             kinds = {"string": str, "number": (int, float), "integer": int,
                      "boolean": bool, "array": list, "object": dict, "null": type(None)}
-            want = kinds.get(expected)
+            asked = TYPE_ALIASES.get(str(expected).strip().lower(),
+                                     str(expected).strip().lower())
+            want = kinds.get(asked)
             if want is None:
-                return False, f"unknown type {expected!r}"
-            if expected == "number" and isinstance(actual, bool):
+                # A project's idea of a type is narrower than JSON's: an id is
+                # a uuid, not merely a string. Checking the format is the
+                # assertion people actually mean.
+                checked = check_format(asked, actual)
+                if checked is not None:
+                    return checked, (f"expected {asked}, got {json_type_name(actual)}"
+                                     if not checked else f"is a valid {asked}")
+                return False, (f"unknown type {expected!r} — JSON has "
+                               f"{', '.join(kinds)}; formats: "
+                               f"{', '.join(sorted(FORMATS))}")
+            if actual is MISSING:
+                # _compare only sees the value; the path and the response are
+                # the caller's to name, so keep this plain and let evaluate()
+                # add what is actually there.
+                return False, "there is nothing at that path, so it has no type to check"
+            if asked == "number" and isinstance(actual, bool):
+                # true is not 1 here: a flag passing a numeric check is the kind
+                # of thing a type assertion exists to catch
                 return False, "expected number, got boolean"
+            # report the JSON name, not Python's: being told a string is a
+            # `str` answers a question nobody asked
             return isinstance(actual, want), \
-                f"expected type {expected}, got {type(actual).__name__}"
+                f"expected {asked}, got {json_type_name(actual)}"
         if op == "contains":
             if isinstance(actual, (list, dict)):
                 return expected in actual, f"{expected!r} not in {type(actual).__name__}"
@@ -202,6 +248,19 @@ def _compare(op, actual, expected):
         if op in ("gt", "gte", "lt", "lte"):
             if actual is MISSING or actual is None:
                 return False, f"cannot compare: value is {actual!r}"
+            if isinstance(actual, (list, dict)):
+                # Comparing a collection with > almost always means "how many",
+                # and the alternative is a float() TypeError naming a Python
+                # builtin — which says nothing about what to write instead.
+                what = (f"a list of {len(actual)} item(s)" if isinstance(actual, list)
+                        else f"an object with {len(actual)} key(s)")
+                friendly = {"gt": "length_gte", "gte": "length_gte",
+                            "lt": "length", "lte": "length"}[op]
+                tail = (" or put `.length` on the end of the path and keep "
+                        f"{op}" if isinstance(actual, list) else "")
+                return False, (
+                    f"this is {what}, not a number, so it cannot be compared with {op}. "
+                    f"To check how many, use `{friendly}` on the same path{tail}.")
             a, b = float(actual), float(expected)
             ok = {"gt": a > b, "gte": a >= b, "lt": a < b, "lte": a <= b}[op]
             return ok, f"expected {op} {expected}, got {actual}"
@@ -216,6 +275,91 @@ def _compare(op, actual, expected):
     except (TypeError, ValueError) as exc:
         return False, f"{type(exc).__name__}: {exc}"
     return False, f"unknown operator {op!r}"
+
+
+# People write the type in whatever language they think in. The assertion is
+# about JSON, so accept the common spellings and answer in JSON's words.
+# JSON's seven types answer "is this a string"; a project usually wants "is
+# this a uuid". These are the formats worth naming, checked properly rather
+# than by eye. Anything else a team writes is refused with the list, because
+# silently passing an assertion nobody can evaluate is worse than saying no.
+FORMATS = {
+    "uuid": r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+            r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+    "email": r"^[^@\s]+@[^@\s]+\.[^@\s]+$",
+    "date": r"^\d{4}-\d{2}-\d{2}$",
+    "date-time": r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}",
+    "time": r"^\d{2}:\d{2}:\d{2}",
+    "url": r"^https?://[^\s]+$",
+    "uri": r"^[a-zA-Z][a-zA-Z0-9+.-]*:[^\s]+$",
+    "ipv4": r"^(\d{1,3}\.){3}\d{1,3}$",
+    "slug": r"^[a-z0-9]+(?:-[a-z0-9]+)*$",
+    "numeric-string": r"^-?\d+(\.\d+)?$",
+}
+
+
+def check_format(name, value):
+    """True/False if `name` is a format we can check, None if we cannot.
+
+    None matters: it is the difference between "this failed" and "nobody can
+    say", and only the second deserves to be refused as unknown."""
+    pattern = FORMATS.get(str(name).strip().lower())
+    if pattern is None:
+        return None
+    if not isinstance(value, str):
+        return False
+    return bool(re.match(pattern, value))
+
+
+TYPE_ALIASES = {
+    "str": "string", "text": "string",
+    "int": "integer", "long": "integer",
+    "float": "number", "double": "number", "decimal": "number", "num": "number",
+    "bool": "boolean",
+    "list": "array", "arr": "array",
+    "dict": "object", "map": "object", "obj": "object",
+    "none": "null", "nil": "null", "nonetype": "null",
+}
+
+
+def json_type_name(value):
+    if value is MISSING:
+        # Reporting the sentinel's Python type said "object", which sent people
+        # looking for a type problem when the path simply found nothing.
+        return "nothing — that path does not exist in the response"
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return type(value).__name__
+
+
+def applies_here(assertion, env_name):
+    """Whether this assertion runs against this environment.
+
+    Most assertions hold everywhere and say nothing. The exceptions are the
+    ones worth naming: a count that is only meaningful on a seeded server, a
+    field only production returns. Scoping them beats the alternatives —
+    duplicating the whole test per environment, or asserting only what is true
+    everywhere, which is usually not much."""
+    only = assertion.get("only_on")
+    skip = assertion.get("except_on")
+    name = (env_name or "").lower()
+    if only:
+        return name in {str(x).lower() for x in (only if isinstance(only, list) else [only])}
+    if skip:
+        return name not in {str(x).lower() for x in (skip if isinstance(skip, list) else [skip])}
+    return True
 
 
 def evaluate(assertion, result, spec_check=None):
@@ -262,6 +406,13 @@ def evaluate(assertion, result, spec_check=None):
         actual = dig(result["json"], path) if result["json"] is not None else MISSING
         op = assertion.get("op", "exists")
         ok, why = _compare(op, actual, assertion.get("value"))
+        # A path that found nothing is a different problem from a value that
+        # was wrong, and the response is right here to say what IS there.
+        if not ok and actual is MISSING and op not in ("not_exists", "is_null"):
+            nearby = rebind_candidates(result["json"], path)
+            if nearby:
+                why = (why + ". The response does have "
+                       + ", ".join(c["path"] for c in nearby[:3]))
         shown = assertion.get("value")
         return ok, label or f"{path} {op}{'' if shown is None else ' ' + repr(shown)}", why
 
@@ -342,6 +493,12 @@ def send(method, url, headers, body, timeout=30):
 # ----------------------------------------------------------------------------
 
 
+def suite_module(suite, path=None):
+    """A suite covers one part of the API. Its own `module`, else its file name —
+    so an existing suite is already classified without anybody editing it."""
+    return suite.get("module") or (Path(path).stem if path else None) or suite.get("name")
+
+
 def load_suites(directory=None, names=None, include_drafts=False, drafts_only=False):
     """Shared suites live in tests/ and are committed. Drafts live in
     tests/drafts/, are gitignored, and are what QA writes while they are still
@@ -364,6 +521,7 @@ def load_suites(directory=None, names=None, include_drafts=False, drafts_only=Fa
             doc["_path"] = str(path)
             doc["_stage"] = stage
             doc.setdefault("name", path.stem)
+            doc.setdefault("module", suite_module(doc, path))
             if names and doc["name"] not in names:
                 continue
             out.append(doc)
@@ -409,6 +567,22 @@ def record_history(results, base_url, env_name=None, spec_digest=None):
                 entry["passes"] += 1
                 entry["last_pass"] = stamp
                 entry["last_pass_spec"] = spec_digest
+
+            # Per environment as well as overall. One slot meant running
+            # against dev overwrote the fact that it passes on the mock, and
+            # "green here, red there" is the most useful thing a test can tell
+            # you — it is the difference between a broken test and a broken
+            # environment.
+            where = env_name or base_url
+            per_env = entry.setdefault("by_env", {})
+            seen = per_env.setdefault(where, {"passes": 0, "runs": 0})
+            seen["runs"] += 1
+            seen["last_outcome"] = item["outcome"]
+            seen["last_run"] = stamp
+            seen["last_spec"] = spec_digest
+            if item["outcome"] == PASS:
+                seen["passes"] += 1
+                seen["last_pass"] = stamp
             history[key] = entry
     HISTORY.parent.mkdir(parents=True, exist_ok=True)
     HISTORY.write_text(json.dumps(history, indent=2) + "\n")
@@ -475,13 +649,23 @@ def promote(suite_name, ident, force=False):
 # ----------------------------------------------------------------------------
 
 
+WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
+
+
 class Runner:
-    def __init__(self, base_url, headers, spec=None, timeout=30, verbose=True):
+    def __init__(self, base_url, headers, spec=None, timeout=30, verbose=True,
+                 readonly=False, env_name=None):
         self.base_url = base_url.rstrip("/")
         self.headers = dict(headers or {})
         self.spec = spec
         self.timeout = timeout
         self.verbose = verbose
+        # Some servers must never be written to from a test run. Making that a
+        # property of the environment means nobody has to remember which suite
+        # is safe to point where — the target refuses, rather than the author
+        # being careful.
+        self.readonly = bool(readonly)
+        self.env_name = env_name
 
     # -- one request -------------------------------------------------------
     def _spec_check(self, request):
@@ -520,6 +704,21 @@ class Runner:
         headers = {**self.headers, **interpolate(spec.get("headers") or {}, scope)}
         body = interpolate(spec.get("body"), scope) if spec.get("body") is not None else None
 
+        if self.readonly and method in WRITE_METHODS:
+            where = f" ({self.env_name})" if self.env_name else ""
+            return {
+                "name": step.get("name") or f"{method} {path}",
+                "role": step.get("role", "target"),
+                "request": {"method": method, "url": self.base_url + str(path), "body": body},
+                "status": None, "ms": 0,
+                "checks": [{"ok": False, "label": f"{method} refused",
+                            "detail": f"this environment{where} is read-only, so nothing "
+                                      f"here may create, change or delete anything. Run "
+                                      f"write tests against a server where that is safe."}],
+                "captured": {}, "outcome": SKIPPED, "response_excerpt": "",
+                "response_json": None, "bindable": [], "refused": True,
+            }
+
         url = self.base_url + (path if str(path).startswith("/") else "/" + str(path))
         if query:
             pairs = {k: ("" if v is None else v) for k, v in query.items()}
@@ -537,16 +736,37 @@ class Runner:
             checks.append({"ok": False, "label": "request completed", "detail": result["error"]})
         else:
             for assertion in (step.get("assertions") or []):
-                ok, label, detail = evaluate(assertion, result, spec_check)
+                # Two kinds of environment difference, and they want different
+                # answers. "The same check, a different number" is a variable:
+                # the assertion is shared and only its value moves, so it is
+                # interpolated from the environment's own data. "This check
+                # only makes sense there" is a different assertion, and says so
+                # with only_on / except_on.
+                if not applies_here(assertion, self.env_name):
+                    continue
+                ok, label, detail = evaluate(interpolate(assertion, scope, strict=False),
+                                             result, spec_check)
                 checks.append({"ok": ok, "label": label, "detail": "" if ok else detail})
 
         captured = {}
         for name, path_expr in (step.get("capture") or {}).items():
             value = dig(result["json"], path_expr) if result["json"] is not None else MISSING
             if value is MISSING:
+                # "not found" leaves the reader diffing two JSON blobs by eye.
+                # The response is right here, so say what it DOES have at that
+                # place — a renamed field is then a one-word fix rather than an
+                # investigation.
+                instead = rebind_candidates(result["json"], path_expr)
+                hint = ""
+                if instead:
+                    shown = ", ".join(c["path"] for c in instead[:3])
+                    hint = (f". The response does have {shown} — if the field was renamed, "
+                            f"point this capture at the new one")
                 checks.append({"ok": False, "label": f"capture {name}",
                                "detail": f"{path_expr} not found in the response — later "
-                                         f"steps that use {{{{{name}}}}} cannot run"})
+                                         f"steps that use {{{{{name}}}}} cannot run{hint}",
+                               "rebind": {"name": name, "was": path_expr,
+                                          "candidates": instead[:6]}})
             else:
                 captured[name] = value
                 scope[name] = value
@@ -561,6 +781,10 @@ class Runner:
             "checks": checks, "captured": captured,
             "outcome": PASS if ok else FAIL,
             "response_excerpt": (result["text"] or "")[:600],
+            # the parsed body and what could be carried out of it, so the
+            # workbench can offer a binding instead of asking for a JSON path
+            "response_json": result["json"] if _small_enough(result["json"]) else None,
+            "bindable": bindable(result["json"], path) if result["json"] is not None else [],
         }
 
     # -- cases and scenarios ----------------------------------------------
@@ -574,6 +798,7 @@ class Runner:
                     "error": str(exc)}
         return {"id": case.get("id"), "name": case.get("name") or case.get("id"),
                 "kind": "case", "tags": case.get("tags", []),
+                "levels": levels_of(case), "module": case.get("module"),
                 "outcome": outcome["outcome"], "steps": [outcome]}
 
     def run_scenario(self, scenario, data):
@@ -583,14 +808,25 @@ class Runner:
         steps, outcome = [], PASS
         blocked_by = None
 
-        for index, step in enumerate(scenario.get("steps") or []):
+        declared = scenario.get("steps") or []
+        # BLOCKED means "the endpoint under test never ran". A flow where every
+        # step is labelled setup has no endpoint under test, so a failure there
+        # reported as blocked forever — telling the reader to go fix a setup
+        # that IS the test. The last step is the target when nothing else
+        # claims to be.
+        has_target = any(st.get("role") == "target" for st in declared)
+        last_index = len(declared) - 1
+
+        for index, step in enumerate(declared):
             if kind == "e2e":
                 # every step is the point in an end-to-end flow; calling them
                 # "setup" would imply they are scaffolding
                 role = step.get("role") or "step"
+            elif not has_target and index == last_index:
+                role = "target"
             else:
                 role = step.get("role") or (
-                    "target" if index == len(scenario["steps"]) - 1 else "setup")
+                    "target" if index == last_index else "setup")
             step = {**step, "role": role}
             if blocked_by:
                 steps.append({"name": step.get("name") or f"step {index + 1}", "role": role,
@@ -629,29 +865,40 @@ class Runner:
 
         return {"id": scenario.get("id"), "name": scenario.get("name") or scenario.get("id"),
                 "kind": "scenario", "scenario_kind": kind, "tags": scenario.get("tags", []),
+                "levels": levels_of(scenario), "module": scenario.get("module"),
                 "outcome": outcome, "steps": steps, "cleanup": cleanup,
                 "blocked_by": blocked_by if outcome == BLOCKED else None}
 
     # -- a whole suite -----------------------------------------------------
-    def run_suite(self, suite, only=None, kinds=None, tags=None):
+    def selects(self, test, suite, only=None, tags=None, levels=None, modules=None):
+        """Every filter in one place, so a case and a scenario cannot drift
+        apart in which runs they appear in."""
+        if only and not re.search(only, f"{test.get('id', '')} {test.get('name', '')}"):
+            return False
+        if tags and not (set(tags) & set(test.get("tags", []))):
+            return False
+        if levels and not (set(levels) & set(levels_of(test))):
+            return False
+        if modules and module_of(test, suite).lower() not in {m.lower() for m in modules}:
+            return False
+        return True
+
+    def run_suite(self, suite, only=None, kinds=None, tags=None, levels=None,
+                  modules=None):
         data = interpolate(suite.get("data") or {}, {}, strict=False)
         results = []
 
         for case in suite.get("cases") or []:
-            if only and not re.search(only, f"{case.get('id', '')} {case.get('name', '')}"):
-                continue
             if kinds and "case" not in kinds:
                 continue
-            if tags and not (set(tags) & set(case.get("tags", []))):
+            if not self.selects(case, suite, only, tags, levels, modules):
                 continue
             results.append(self.run_case(case, data))
 
         for scenario in suite.get("scenarios") or []:
-            if only and not re.search(only, f"{scenario.get('id', '')} {scenario.get('name', '')}"):
-                continue
             if kinds and scenario.get("kind", "api") not in kinds:
                 continue
-            if tags and not (set(tags) & set(scenario.get("tags", []))):
+            if not self.selects(scenario, suite, only, tags, levels, modules):
                 continue
             results.append(self.run_scenario(scenario, data))
         return results
@@ -731,6 +978,122 @@ def summarise(all_results, args=None):
     return counts
 
 
+def write_html(all_results, path, env=None, base_url=None, digest=None):
+    """A report a person can open.
+
+    JUnit XML is for a CI server and JSON is for a program; neither is
+    something you can send to whoever asked "did it pass on staging?". This
+    says what ran, where, against which document, and — for anything that
+    failed — which assertion and whose problem it is."""
+    from html import escape
+
+    rows, totals = [], {}
+    for suite_name, items in all_results:
+        for item in items:
+            outcome = item.get("outcome", UNKNOWN_OUTCOME)
+            totals[outcome] = totals.get(outcome, 0) + 1
+            rows.append((suite_name, item, outcome))
+
+    def steps_of(item):
+        return item.get("steps") or []
+
+    def detail_html(item):
+        out = []
+        for step in steps_of(item):
+            checks = step.get("checks") or []
+            bad = [c for c in checks if not c.get("ok")]
+            out.append(
+                f"<div class='step {'bad' if bad else 'good'}'>"
+                f"<span class='role'>{escape(str(step.get('role', '')))}</span> "
+                f"<b>{escape(str(step.get('name', '')))}</b> "
+                f"<span class='muted'>{escape(str(step.get('status') or '—'))}"
+                f" · {escape(str(step.get('ms', '?')))}ms</span>"
+                + "".join(
+                    f"<div class='check {'ok' if c.get('ok') else 'no'}'>"
+                    f"{'PASS' if c.get('ok') else 'FAIL'} {escape(str(c.get('label', '')))}"
+                    + (f" — {escape(str(c.get('detail', '')))}" if not c.get("ok") else "")
+                    + "</div>" for c in checks)
+                + "</div>")
+        v = item.get("verdict")
+        if v:
+            out.append(
+                f"<div class='verdict'><b>{escape(v.get('headline', ''))}</b>"
+                + "".join(f"<div class='muted'>{escape(str(e))}</div>"
+                          for e in (v.get("evidence") or []))
+                + (f"<div><b>Next:</b> {escape(v.get('next') or v.get('guidance') or '')}"
+                   f"</div>" if (v.get("next") or v.get("guidance")) else "")
+                + "</div>")
+        return "".join(out)
+
+    failed = totals.get(FAIL, 0) + totals.get(ERROR, 0)
+    summary = "  ".join(f"{n} {k}" for k, n in sorted(totals.items()))
+    body = "".join(
+        f"<tr class='{outcome}'>"
+        f"<td><span class='pill {outcome}'>{outcome}</span></td>"
+        f"<td>{escape(suite_name)}</td>"
+        f"<td><b>{escape(str(item.get('name') or item.get('id')))}</b>"
+        f"<div class='muted'>{escape(str(item.get('id', '')))}"
+        + (f" · {escape(', '.join(item.get('levels') or []))}"
+           if item.get("levels") else "") + "</div></td>"
+        f"<td>{len(steps_of(item))}</td>"
+        f"<td><details><summary>show</summary>{detail_html(item)}</details></td></tr>"
+        for suite_name, item, outcome in rows)
+
+    html = f"""<!doctype html>
+<meta charset="utf-8"><title>Test report — {escape(str(env or base_url or ''))}</title>
+<style>
+ body{{font:14px/1.5 system-ui,sans-serif;margin:30px auto;max-width:1100px;padding:0 16px;
+      color:#1a1a1a}}
+ h1{{margin:0 0 4px}} .muted{{color:#666;font-size:12px}}
+ table{{border-collapse:collapse;width:100%;margin-top:16px}}
+ th,td{{border-bottom:1px solid #e4e4e4;padding:7px 9px;text-align:left;vertical-align:top;
+       font-size:13px}}
+ th{{background:#f6f6f6}}
+ .pill{{font-size:11px;font-weight:700;padding:2px 7px;border-radius:10px;
+       border:1px solid currentColor}}
+ .pass{{color:#136c34}} .fail,.error{{color:#b3261e}} .blocked{{color:#8a6100}}
+ .skipped{{color:#666}}
+ .step{{margin:6px 0;padding:6px 8px;border-left:3px solid #ddd;background:#fafafa}}
+ .step.bad{{border-color:#b3261e}} .step.good{{border-color:#136c34}}
+ .role{{font-size:10px;text-transform:uppercase;color:#666}}
+ .check{{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;margin-left:8px}}
+ .check.ok{{color:#136c34}} .check.no{{color:#b3261e}}
+ .verdict{{margin:6px 0;padding:7px 9px;background:#fff8e6;border:1px solid #f0d9a0;
+          border-radius:5px}}
+ .tiles{{display:flex;gap:22px;margin:14px 0}} .n{{font-size:24px;font-weight:700}}
+ @media(prefers-color-scheme:dark){{
+   body{{background:#141414;color:#e8e8e8}} th{{background:#1f1f1f}}
+   th,td{{border-color:#333}} .step{{background:#1b1b1b;border-color:#444}}
+   .verdict{{background:#241f10;border-color:#4a3c18}}}}
+</style>
+<h1>Test report</h1>
+<p class="muted">
+  against <b>{escape(str(env or base_url or 'unknown'))}</b>
+  {f"({escape(str(base_url))})" if base_url and env else ""}<br>
+  document {escape(str(digest or 'not recorded'))[:16]}<br>
+  {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}
+</p>
+<div class="tiles">
+  <div><div class="n pass">{totals.get(PASS, 0)}</div>passed</div>
+  <div><div class="n fail">{failed}</div>failed</div>
+  <div><div class="n blocked">{totals.get(BLOCKED, 0)}</div>blocked</div>
+  <div><div class="n skipped">{totals.get(SKIPPED, 0)}</div>skipped</div>
+</div>
+<p class="muted">{escape(summary)}
+{" · blocked means the endpoint under test never ran, because its setup failed"
+ if totals.get(BLOCKED) else ""}</p>
+<table>
+  <tr><th>Outcome</th><th>Section</th><th>Test</th><th>Steps</th><th>Detail</th></tr>
+  {body}
+</table>
+"""
+    Path(path).write_text(html)
+    return path
+
+
+UNKNOWN_OUTCOME = "unknown"
+
+
 def write_junit(all_results, path, env=None, base_url=None, digest=None):
     def esc(text):
         return (str(text).replace("&", "&amp;").replace("<", "&lt;")
@@ -797,6 +1160,13 @@ def validate_assertion(assertion, where):
     if kind == "jsonpath":
         if "path" not in assertion:
             errors.append(f"{where}: a jsonpath assertion needs `path`")
+        for scope_key in ("only_on", "except_on"):
+            value = assertion.get(scope_key)
+            if value is not None and not isinstance(value, (str, list)):
+                errors.append(f"{where}: `{scope_key}` must be an environment name "
+                              f"or a list of them")
+        if assertion.get("only_on") and assertion.get("except_on"):
+            errors.append(f"{where}: give `only_on` or `except_on`, not both")
         op = assertion.get("op", "exists")
         if op not in OPERATORS:
             errors.append(f"{where}: unknown operator {op!r}")
@@ -824,6 +1194,263 @@ def validate_request(spec_block, where):
     return errors
 
 
+# ----------------------------------------------------------------------------
+# Classification
+# ----------------------------------------------------------------------------
+#
+# "Run the smoke tests for billing against staging" has to be answerable by the
+# runner, not by a person remembering which files those are. Free-text tags
+# could not answer it: nothing said a tag was a level rather than a note, and
+# nothing said which part of the API a test belonged to.
+#
+# So two axes, deliberately few:
+#
+#   module   which part of the API — one per suite, because a suite is already
+#            a file per area. Defaulted from the operation's own spec tag, so
+#            nobody types it.
+#   level    how far it runs — a controlled list, because a typo in a free
+#            string silently removes a test from the run that was meant to
+#            include it.
+#
+# Anything else a team wants to say stays in `tags`, which is unrestricted.
+
+LEVELS = ("smoke", "sanity", "regression", "negative", "performance")
+LEVEL_MEANING = {
+    "smoke": "does the surface answer at all — the first thing to run, seconds not minutes",
+    "sanity": "an end-to-end flow a person would perform, proving the pieces fit together",
+    "regression": "everything that has broken before, and everything that must not",
+    "negative": "the API refusing what it should refuse, in the shape it documents",
+    "performance": "it answered, but did it answer in time",
+}
+
+
+def levels_of(test):
+    """A test's levels, accepting the tags teams already wrote."""
+    declared = test.get("levels")
+    if declared:
+        return [str(x).lower() for x in declared]
+    # tags were the only home for this before; honour the ones that are levels
+    return [t for t in (test.get("tags") or []) if str(t).lower() in LEVELS] or ["regression"]
+
+
+def module_of(test, suite):
+    """Which part of the API this belongs to."""
+    return (test.get("module") or suite.get("module")
+            or suite.get("name") or "unsorted")
+
+
+# ----------------------------------------------------------------------------
+# Binding one step's output to the next step's input
+# ----------------------------------------------------------------------------
+#
+# The model has always supported this — capture a value, use {{it}} later. What
+# it lacked was any way to discover the path: you had to already know the
+# response said `data.id`, and type it. So the workbench runs a step, shows the
+# real body, and turns a clicked field into a binding. The name is proposed
+# from what was clicked and where it came from, because naming things is the
+# part people skip, and `{{departmentId}}` reads in a way `{{id2}}` never will.
+
+ID_KEYS = ("id", "uuid", "guid", "key", "code", "token", "slug", "number", "ref")
+NOISE = ("api", "v1", "v2", "v3", "list", "read", "create", "update", "delete",
+         "search", "all", "get")
+
+
+def _id_shaped(key):
+    """Does this field name identify something?
+
+    Deliberately a little generous: `identifier`, `userId` and `pk` all name a
+    thing, and the cost of offering one candidate too many is a glance, while
+    the cost of missing the right one is a hunt through the response."""
+    raw = str(key)
+    lowered = raw.lower()
+    if lowered in ID_KEYS or lowered in ("pk", "_id"):
+        return True
+    if "identifier" in lowered:
+        return True
+    # a real word boundary, or "valid" and "width" come along for the ride
+    return bool(re.search(r"(_id|[a-z0-9]Id)$", raw))
+
+
+def _resource_from_path(request_path):
+    """'/api/v1/recruitment-settings/positions/departments' -> 'department'."""
+    parts = [p for p in str(request_path or "").split("/")
+             if p and not p.startswith("{") and p.lower() not in NOISE]
+    if not parts:
+        return ""
+    word = re.split(r"[-_]", parts[-1])[-1]
+    return word[:-1] if len(word) > 3 and word.endswith("s") else word
+
+
+def _camel_join(*words):
+    parts = [w for chunk in words for w in re.split(r"[^A-Za-z0-9]+", str(chunk)) if w]
+    if not parts:
+        return "value"
+    head, *rest = parts
+    return head[:1].lower() + head[1:] + "".join(w[:1].upper() + w[1:] for w in rest)
+
+
+def rebind_candidates(payload, missing_path):
+    """Where a value that used to be at `missing_path` might have moved to.
+
+    Ranked by how little would have to change: the same leaf name somewhere
+    else, then the same container holding something id-shaped, then anything
+    id-shaped at all. This is the whole maintenance story — a field rename
+    should cost one edit, not an afternoon."""
+    if payload is None:
+        return []
+    leaf = str(missing_path).split(".")[-1]
+    leaf = re.sub(r"\[\d+\]$", "", leaf).lower()
+    container = ".".join(str(missing_path).split(".")[:-1])
+
+    ranked = []
+    for entry in bindable(payload):
+        path = entry["path"]
+        tail = re.sub(r"\[\d+\]$", "", path.split(".")[-1]).lower()
+        same_container = ".".join(path.split(".")[:-1]) == container
+        if tail == leaf:
+            score = 0                              # moved, same name
+        elif same_container and entry["looks_like_id"]:
+            score = 1                              # renamed, same place
+        elif same_container:
+            score = 2
+        elif entry["looks_like_id"]:
+            score = 3
+        else:
+            score = 4                              # nothing alike; still worth seeing
+        ranked.append((score, len(path), {**entry, "why": _REBIND_WHY[score]}))
+    ranked.sort(key=lambda r: (r[0], r[1]))
+    return [r[2] for r in ranked]
+
+
+_REBIND_WHY = {
+    0: "the same field name, in a different place",
+    1: "an id in the same place the old one was",
+    2: "in the same place the old one was",
+    3: "an id elsewhere in the response",
+    4: "also in the response",
+}
+
+
+def _small_enough(payload, limit=200_000):
+    """A response the browser can render as a clickable tree without stalling."""
+    if payload is None:
+        return False
+    try:
+        return len(json.dumps(payload)) <= limit
+    except (TypeError, ValueError):
+        return False
+
+
+def binding_name(json_path, request_path="", taken=()):
+    """A name a person would have chosen for this value."""
+    leaf = str(json_path).split(".")[-1]
+    leaf = re.sub(r"\[\d+\]$", "", leaf)
+    resource = _resource_from_path(request_path)
+    if leaf.lower() in ID_KEYS and resource:
+        name = _camel_join(resource, leaf)             # data.id on /departments -> departmentId
+    elif resource and leaf.lower().startswith(resource.lower()):
+        name = _camel_join(leaf)                       # department_id -> departmentId
+    elif resource and leaf.lower() in ("name", "title", "email", "status"):
+        name = _camel_join(resource, leaf)             # title on /departments -> departmentTitle
+    else:
+        name = _camel_join(leaf)
+
+    if name not in taken:
+        return name
+    n = 2                                          # never silently overwrite a binding
+    while f"{name}{n}" in taken:
+        n += 1
+    return f"{name}{n}"
+
+
+def bindable(payload, request_path="", prefix="", depth=0, out=None):
+    """Every scalar in a response that could be carried into a later step.
+
+    Ids first: they are what a chained step almost always needs, and putting
+    them at the top is the difference between clicking once and scrolling."""
+    out = [] if out is None else out
+    if depth > 4:
+        return out
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            path = f"{prefix}.{key}" if prefix else key
+            if isinstance(value, (dict, list)):
+                bindable(value, request_path, path, depth + 1, out)
+            elif value is not None and not isinstance(value, bool):
+                out.append({"path": path, "value": value,
+                            "suggested": binding_name(path, request_path),
+                            "looks_like_id": _id_shaped(key)})
+    elif isinstance(payload, list):
+        # How many came back is usually the thing worth asserting on — "there
+        # is at least one country" — and without this the only evidence a list
+        # was a list at all was an [0] buried in a path.
+        out.append({"path": f"{prefix}.length" if prefix else "length",
+                    "value": len(payload), "of_list": True,
+                    "suggested": binding_name(f"{prefix}Count" if prefix else "count",
+                                              request_path),
+                    "looks_like_id": False})
+        if payload:
+            bindable(payload[0], request_path, f"{prefix}[0]", depth + 1, out)
+    if not prefix:
+        out.sort(key=lambda b: (not b["looks_like_id"], b["path"]))
+    return out
+
+
+def known_types(suites=None):
+    """Every type an assertion may name: JSON's own, the formats we can check,
+    and any the project has already used successfully.
+
+    The last part is the point. A fixed list goes stale the moment a team
+    starts caring about something it does not contain, and a list that only
+    grows by editing this file is a list nobody grows."""
+    builtin = ["string", "number", "integer", "boolean", "array", "object", "null"]
+    formats = sorted(FORMATS)
+    used = []
+    for suite in (suites or []):
+        for item in (suite.get("cases") or []) + (suite.get("scenarios") or []):
+            for step in (item.get("steps") or [item]):
+                for assertion in (step.get("assertions") or []):
+                    if assertion.get("op") != "type":
+                        continue
+                    value = str(assertion.get("value", "")).strip().lower()
+                    if value and value not in builtin and value not in formats:
+                        used.append(value)
+    return {"json": builtin, "formats": formats,
+            "in_use": sorted(set(used)),
+            "all": builtin + formats + sorted(set(used))}
+
+
+def taxonomy(suites):
+    """What can be selected, and how much each selection would run.
+
+    The console builds its pickers from this and the CI generator writes the
+    same names into a pipeline, so the two can never offer different choices."""
+    modules, levels, kinds = {}, {}, {}
+    total = 0
+    for suite in suites:
+        for item in (suite.get("cases") or []):
+            _count(item, suite, "case", modules, levels, kinds)
+            total += 1
+        for item in (suite.get("scenarios") or []):
+            _count(item, suite, item.get("kind", "api"), modules, levels, kinds)
+            total += 1
+    return {
+        "total": total,
+        "modules": [{"name": k, "tests": v} for k, v in sorted(modules.items())],
+        "levels": [{"name": k, "tests": levels.get(k, 0), "means": LEVEL_MEANING[k]}
+                   for k in LEVELS],
+        "kinds": [{"name": k, "tests": v} for k, v in sorted(kinds.items())],
+    }
+
+
+def _count(item, suite, kind, modules, levels, kinds):
+    module = module_of(item, suite)
+    modules[module] = modules.get(module, 0) + 1
+    kinds[kind] = kinds.get(kind, 0) + 1
+    for level in levels_of(item):
+        levels[level] = levels.get(level, 0) + 1
+
+
 def validate_test(test, kind=None):
     """Check a case or scenario before it is written to disk.
 
@@ -839,6 +1466,11 @@ def validate_test(test, kind=None):
         errors.append("missing `id`")
     elif not re.fullmatch(r"[A-Za-z0-9._-]+", str(test["id"])):
         errors.append(f"{ident}: `id` may only contain letters, digits, . _ -")
+
+    for level in (test.get("levels") or []):
+        if str(level).lower() not in LEVELS:
+            errors.append(f"{ident}: level {level!r} is not one of {', '.join(LEVELS)}. "
+                          f"Anything else belongs in `tags`.")
 
     is_scenario = "steps" in test or kind == "scenario"
     if is_scenario:
@@ -896,6 +1528,18 @@ def import_tests(payload, suite_name, stage="draft", data=None):
         payload = json.loads(payload)
 
     cases, scenarios, suite_data = [], [], dict(data or {})
+    # A whole export — {"suites": [...]} — is the one wrapper a person is most
+    # likely to hand back, because it is what the export button produced.
+    if isinstance(payload, dict) and isinstance(payload.get("suites"), list):
+        merged = {"cases": [], "scenarios": [], "data": {}}
+        for suite in payload["suites"]:
+            if not isinstance(suite, dict):
+                continue
+            merged["cases"] += suite.get("cases") or []
+            merged["scenarios"] += suite.get("scenarios") or []
+            merged["data"].update(suite.get("data") or {})
+            suite_name = suite_name or suite.get("name")
+        payload = merged
     if isinstance(payload, dict) and ("cases" in payload or "scenarios" in payload):
         cases = payload.get("cases") or []
         scenarios = payload.get("scenarios") or []
@@ -1073,6 +1717,274 @@ RULES
 """
 
 
+def shape_of(payload):
+    """{path: json type} for a response — its shape, without its values.
+
+    Two servers answering the same operation rarely disagree about values in a
+    way that matters; they disagree about SHAPE, and that is what breaks a
+    binding. A test authored against a mock captures data.id because the mock
+    invented data.id, and nothing says so until the real server returns
+    something else."""
+    return {b["path"]: json_type_name(b["value"])
+            for b in bindable(payload)} if payload is not None else {}
+
+
+def compare_shapes(here, there, here_name="here", there_name="there"):
+    """What a flow written against one server would find missing on another."""
+    a, b = shape_of(here), shape_of(there)
+    missing = sorted(set(a) - set(b))
+    added = sorted(set(b) - set(a))
+    retyped = sorted(path for path in (set(a) & set(b)) if a[path] != b[path])
+    return {
+        "same": not (missing or added or retyped),
+        "only_on_" + here_name: missing,
+        "only_on_" + there_name: added,
+        "different_type": [{"path": p, here_name: a[p], there_name: b[p]}
+                           for p in retyped],
+        "counts": {"shared": len(set(a) & set(b)), "missing": len(missing),
+                   "added": len(added), "retyped": len(retyped)},
+    }
+
+
+def bindings_at_risk(steps, shape_there):
+    """Which captures and assertions would not survive the move.
+
+    This is the question worth answering: not "do the shapes differ" — they
+    always do a little — but "does anything this flow depends on disappear"."""
+    at_risk = []
+    for index, step in enumerate(steps or []):
+        for name, path in (step.get("capture") or {}).items():
+            if path not in shape_there:
+                at_risk.append({"step": index + 1, "kind": "capture",
+                                "name": name, "path": path})
+        for assertion in (step.get("assertions") or []):
+            path = assertion.get("path")
+            if assertion.get("type", "jsonpath") == "jsonpath" and path \
+                    and path not in shape_there \
+                    and assertion.get("op") not in ("not_exists", "is_null"):
+                at_risk.append({"step": index + 1, "kind": "assertion",
+                                "name": f"{path} {assertion.get('op', 'exists')}",
+                                "path": path})
+    return at_risk
+
+
+def operation_brief(route, sample=None, limit=900):
+    """One operation's contract, compactly: what it takes and what it returns.
+
+    The briefs used to list operations by name and summary alone, which asks an
+    assistant to invent field names — and it will, plausibly, and the tests
+    then fail for a reason nobody can see. The schemas and a real response are
+    the whole difference between generated tests that run and generated tests
+    that look right."""
+    lines = [f"{route['key']}"
+             + (f"   — {route['summary']}" if route.get("summary") else "")]
+
+    # tolerate a partial route: a brief is a convenience, and crashing while
+    # building one is a poor trade for a key that might be absent
+    params = route.get("parameters") or []
+    required = [p for p in params if p.get("required")]
+    optional = [p for p in params if not p.get("required")]
+    for group, label in ((required, "required"), (optional, "optional")):
+        for prm in group[:8]:
+            schema = prm.get("schema") or {}
+            kind = schema.get("type") or "?"
+            enum = schema.get("enum")
+            lines.append(f"    {label} {prm.get('in')} param  {prm.get('name')}: {kind}"
+                         + (f"  one of {enum}" if enum else ""))
+
+    media = ((route.get("request_body") or {}).get("content") or {}).get("application/json")
+    if media and media.get("schema"):
+        lines.append("    request body:")
+        lines.append(_indent(json.dumps(media["schema"], indent=2)[:limit], 6))
+    elif route["method"] in ("POST", "PUT", "PATCH"):
+        lines.append("    request body: the document declares none")
+
+    responses = route.get("responses") or {}
+    from mockd import _success_status
+    success = _success_status(responses) if responses else "200"
+    schema = (((responses.get(success) or {}).get("content") or {})
+              .get("application/json") or {}).get("schema")
+    if schema:
+        lines.append(f"    response {success}:")
+        lines.append(_indent(json.dumps(schema, indent=2)[:limit], 6))
+    else:
+        lines.append(f"    response {success}: NO schema declared — assert only on "
+                     f"fields visible in the example, and do not use type \"schema\"")
+    others = [str(c) for c in sorted(responses) if str(c) != str(success)]
+    if others:
+        lines.append(f"    also documents: {', '.join(others)}")
+    if sample is not None:
+        lines.append("    a real response:")
+        lines.append(_indent(json.dumps(sample, indent=2)[:limit], 6))
+    return "\n".join(lines)
+
+
+def _indent(text, spaces):
+    pad = " " * spaces
+    return "\n".join(pad + line for line in str(text).splitlines())
+
+
+def more_like_pack(spec, suites, module=None, limit=4, samples=None):
+    """A brief for "write more tests like the ones we already have".
+
+    story_pack starts from a requirement; this starts from the team's own work,
+    which is the better starting point once there IS any: the house style is
+    already decided, and what is missing is coverage rather than direction. So
+    show real examples, then name the operations nothing touches yet — that gap
+    is the whole request, and spelling it out beats asking for "more tests"."""
+    examples, covered_paths, ids = [], set(), []
+    for suite in suites:
+        if module and (suite.get("module") or suite.get("name")) != module:
+            continue
+        for item in (suite.get("cases") or []) + (suite.get("scenarios") or []):
+            ids.append(item.get("id"))
+            for step in (item.get("steps") or [item]):
+                request = step.get("request") or {}
+                if request.get("path"):
+                    covered_paths.add((str(request.get("method", "GET")).upper(),
+                                       request["path"]))
+            if len(examples) < limit:
+                examples.append(item)
+
+    untouched = []
+    for route in (spec.routes if spec is not None else []):
+        if module and module.lower() not in (
+                [t.lower() for t in (route.get("tags") or [])] + [route["path"].lower()]):
+            continue
+        hit = any(m == route["method"] and _same_shape(p, route["path"])
+                  for m, p in covered_paths)
+        if not hit:
+            untouched.append(route)
+
+    lines = [
+        "Write more API tests for a project that already has some.",
+        "Match the style of the examples: same shapes, same naming, same care "
+        "about what is asserted.",
+        "",
+        "WHAT THIS PROJECT'S TESTS LOOK LIKE",
+        "-" * 70,
+        json.dumps(examples, indent=2) if examples else "(none yet)",
+        "",
+    ]
+    if untouched:
+        lines += ["OPERATIONS NOTHING COVERS YET — this is the gap to fill",
+                  "-" * 70]
+        for route in untouched[:12]:
+            lines.append(operation_brief(route, (samples or {}).get(route["key"])))
+            lines.append("")
+        if len(untouched) > 12:
+            lines.append(f"... and {len(untouched) - 12} more operations with no coverage")
+            lines.append("")
+    else:
+        lines += ["Every operation is touched by something already. Aim at the cases "
+                  "around them instead: the documented failures, the empty list, the "
+                  "value at its limit.", ""]
+
+    lines += [GRAMMAR, ""]
+    if ids:
+        lines += ["IDS ALREADY TAKEN — yours must not collide", "-" * 70,
+                  ", ".join(sorted(i for i in ids if i)), ""]
+    lines += [
+        "WHAT TO RETURN",
+        "-" * 70,
+        "A JSON array of cases and scenarios, nothing else.",
+        "  * every test needs `levels`, one of: " + ", ".join(LEVELS),
+        "  * a value that must differ between runs uses {{$uuid}} or {{$runId}}",
+        "  * anything created gets a cleanup step",
+        "  * assert on what the response means, not only that it arrived",
+    ]
+    return "\n".join(lines)
+
+
+def _same_shape(a, b):
+    """/x/{id} and /x/{{thing}} and /x/abc all describe the same route."""
+    norm = lambda p: re.sub(r"\{\{?[^}]+\}?\}", "{}", str(p))
+    return norm(a) == norm(b)
+
+
+def relevant_routes(spec, story, limit=8):
+    """The operations a story is probably about.
+
+    Separate from the brief so a caller can fetch real responses for exactly
+    these — sampling some other six operations puts the wrong data in front of
+    the assistant, which is worse than none."""
+    words = {w for w in re.split(r"[^A-Za-z0-9]+", (story or "").lower())
+             if len(w) > 3 and w not in STORY_STOPWORDS}
+    scored = []
+    for route in (spec.routes if spec is not None else []):
+        haystack = " ".join([route["path"], route.get("summary") or "",
+                             " ".join(route.get("tags") or [])]).lower()
+        hits = sum(1 for w in words if w in haystack)
+        if hits:
+            scored.append((hits, route))
+    scored.sort(key=lambda pair: (-pair[0], len(pair[1]["path"])))
+    return [route for _, route in scored[:limit]]
+
+
+def story_pack(spec, story, existing=None, limit=6, samples=None):
+    """A brief for turning a user story into tests.
+
+    context_pack starts from an operation; this starts from what somebody wants
+    the system to do, which is how requirements actually arrive. The work is
+    choosing WHICH operations to put in front of the assistant: a whole spec is
+    too much to reason about and produces vague tests, so match the story's own
+    words against the paths, summaries and tags and send only those.
+
+    What comes back is imported through the same validator as a human's paste,
+    into drafts, and earns promotion by passing. Nothing generated is trusted
+    because of where it came from."""
+    chosen = relevant_routes(spec, story, limit)
+
+    lines = [
+        "You are writing API tests for a team that already has a house format.",
+        "",
+        "THE STORY",
+        "-" * 70,
+        (story or "").strip(),
+        "",
+    ]
+    if chosen:
+        lines += ["OPERATIONS THAT LOOK RELEVANT",
+                  "Use these and no others. If the story needs something absent from",
+                  "this list, say so instead of inventing an endpoint.",
+                  "-" * 70]
+        for route in chosen:
+            lines.append(operation_brief(route, (samples or {}).get(route["key"])))
+            lines.append("")
+    else:
+        lines += ["NO OPERATION MATCHED THE STORY.",
+                  "Say which endpoints you would need rather than guessing at names.",
+                  ""]
+
+    lines += [GRAMMAR, ""]
+    if existing:
+        lines += ["ALREADY COVERED — do not repeat these", "-" * 70]
+        lines += [f"  {item}" for item in existing[:40]]
+        lines.append("")
+    lines += [
+        "WHAT TO RETURN",
+        "-" * 70,
+        "A JSON array of cases and scenarios, nothing else — no prose around it.",
+        "Rules that matter here:",
+        "  * a value that must differ between runs uses {{$uuid}} or {{$runId}},",
+        "    never a constant, or the second run collides with the first",
+        "  * anything a flow creates gets a cleanup step that deletes it",
+        "  * give every test `levels`, one of: " + ", ".join(LEVELS),
+        "  * a flow whose earlier steps only make the target reachable is",
+        "    kind \"api\"; a flow where every step matters is kind \"e2e\"",
+        "  * assert what the story promises, not merely that a 200 came back",
+    ]
+    return "\n".join(lines)
+
+
+STORY_STOPWORDS = {
+    "that", "this", "with", "from", "have", "should", "would", "when", "then",
+    "given", "want", "need", "able", "user", "users", "system", "they", "their",
+    "must", "into", "what", "which", "your", "than", "them", "some", "only",
+    "also", "about", "after", "before", "being", "does", "each", "make",
+}
+
+
 def context_pack(spec, operation=None, sample=None, existing=None):
     """A self-contained brief: the grammar, the operation's contract, a real
     response, and what is already covered.
@@ -1182,7 +2094,13 @@ def build_runner(args):
                 print("         Results below are against THIS document, not the pinned one.")
             elif provenance["state"] == "unlocked":
                 print(f"note: {provenance['message']}")
-    return Runner(base_url, headers, spec, args.timeout), base_url, env_data, provenance
+    readonly = False
+    if args.env:
+        import environments as envmod
+        readonly = envmod.is_readonly(args.env)
+    return (Runner(base_url, headers, spec, args.timeout, readonly=readonly,
+                   env_name=args.env),
+            base_url, env_data, provenance)
 
 
 def main():
@@ -1205,6 +2123,8 @@ def main():
                            help="print the context an assistant needs to write tests")
     brief.add_argument("--operation", help="e.g. 'GET /api/v1/account/list'")
     brief.add_argument("--spec", default=None)
+    brief.add_argument("--story", help="a user story to turn into tests, instead of "
+                                       "starting from one operation")
     brief.add_argument("--base-url", help="fetch a real sample response from here")
 
     prom = sub.add_parser("promote",
@@ -1229,6 +2149,11 @@ def main():
     run.add_argument("--kind", action="append", choices=["case", "api", "e2e"],
                      help="case | api | e2e; repeatable. --kind e2e is the sanity run")
     run.add_argument("--tag", action="append")
+    run.add_argument("--level", action="append", choices=list(LEVELS),
+                     help="how far to run: smoke, sanity, regression, negative, "
+                          "performance. Repeatable.")
+    run.add_argument("--module", action="append",
+                     help="which part of the API, as named by the suite. Repeatable.")
     run.add_argument("--var", action="append", default=[], metavar="name=value",
                      help="override suite data, repeatable")
     run.add_argument("--timeout", type=int, default=30)
@@ -1238,6 +2163,7 @@ def main():
                           "a substituted document")
     run.add_argument("--json", help="write the full result as JSON")
     run.add_argument("--junit", help="write a JUnit XML report")
+    run.add_argument("--html", help="write a report a person can open and send on")
     run.add_argument("--verbose", action="store_true", help="show passing assertions too")
     args = ap.parse_args()
 
@@ -1304,7 +2230,10 @@ def main():
         for suite in load_suites(include_drafts=True):
             covered += [c.get("id") for c in (suite.get("cases") or [])]
             covered += [s.get("id") for s in (suite.get("scenarios") or [])]
-        print(context_pack(spec, args.operation, sample, covered))
+        if args.story:
+            print(story_pack(spec, args.story, covered))
+        else:
+            print(context_pack(spec, args.operation, sample, covered))
         return 0
 
     if args.command == "promote":
@@ -1365,7 +2294,8 @@ def main():
     for suite in suites:
         if overrides:
             suite = {**suite, "data": {**(suite.get("data") or {}), **overrides}}
-        results = runner.run_suite(suite, args.only, kinds, args.tag)
+        results = runner.run_suite(suite, args.only, kinds, args.tag,
+                                   args.level, args.module)
         for item in results:
             if item["outcome"] != PASS:
                 key = f"{suite['name']}/{item.get('id') or item.get('name')}"
@@ -1387,6 +2317,10 @@ def main():
              "suites": [{"name": n, "results": r} for n, r in all_results]},
             indent=2, default=str) + "\n")
         print(f"JSON report:  {args.json}")
+    if args.html:
+        write_html(all_results, args.html, args.env, base_url,
+                   (provenance or {}).get("digest"))
+        print(f"HTML report: {args.html}")
     if args.junit:
         write_junit(all_results, args.junit, args.env, base_url,
                     (provenance or {}).get("digest"))

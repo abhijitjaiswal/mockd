@@ -89,6 +89,18 @@
       "data": {
         "knownDepartmentId": "${DEV_DEPARTMENT_ID}"
       }
+    },
+    "prod": {
+      "description": "Production \u2014 reads only",
+      "base_url": "${PROD_BASE_URL}",
+      "readonly": true,
+      "auth": {
+        "mode": "none"
+      },
+      "headers": {
+        "Cookie": "${PROD_COOKIE}"
+      },
+      "data": {}
     }
   }
 }

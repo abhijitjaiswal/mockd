@@ -180,6 +180,28 @@ def attribute(item, spec=None, history=None, provenance=None):
                             f"for {status} does not declare")
             return _verdict(TEST_ASSUMES, evidence, None)
 
+    # 4b. The same test, the same spec, green somewhere else. That is the
+    #     strongest evidence available that the code is fine and the server or
+    #     its data is not — and it is the question a person would otherwise
+    #     answer by running it again somewhere else by hand.
+    by_env = hist.get("by_env") or {}
+    here = (provenance or {}).get("env") or hist.get("last_env")
+    elsewhere = [
+        (name, seen) for name, seen in by_env.items()
+        if name != here and seen.get("last_outcome") == "pass"
+        and (not now_digest or not seen.get("last_spec")
+             or seen.get("last_spec") == now_digest)
+    ]
+    if elsewhere:
+        names = ", ".join(name for name, _ in elsewhere[:3])
+        evidence.append(f"the same test passes on {names}, against the same document")
+        if status is not None:
+            evidence.append(f"here it returned {status}")
+        return _verdict(ENVIRONMENT, evidence,
+                        f"Compare this environment with {elsewhere[0][0]}: the test and "
+                        f"the spec are identical, so the difference is the server or the "
+                        f"data in it.")
+
     # 5. A test that used to pass on this environment and now does not, with no
     #    spec movement, points at state rather than code.
     if hist.get("passes") and hist.get("last_outcome") != "pass":
