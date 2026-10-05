@@ -128,6 +128,13 @@ def attribute(item, spec=None, history=None, provenance=None):
         return _verdict(BACKEND_BROKE, evidence,
                         "Something that does not exist should be answered with 404.")
 
+    # A check that left the credentials off and was answered anyway is the most
+    # serious thing in this list, and it is not about the test or the data.
+    if "access" in (item.get("tags") or []) and status is not None and 200 <= int(status) < 300:
+        evidence.append(f"answered {status} to a caller who had not signed in")
+        return _verdict(BACKEND_BROKE, evidence,
+                        "This endpoint is open to anyone. It should refuse with 401 or 403.")
+
     # 3. A status the document never mentions, or a body that breaks its own
     #    schema, is the provider contradicting itself.
     if route is not None and status is not None:

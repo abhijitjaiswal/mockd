@@ -727,7 +727,80 @@ def missing_cases(spec):
     return out
 
 
-KINDS = ("lifecycle", "contract", "omission", "parameter", "missing")
+PUBLIC = re.compile(r"(log-?in|log-?out|sign-?in|sign-?up|sign-?out|register|auth|oauth|sso|token|"
+                    r"refresh|callback|health|ping|status|version|docs|openapi|swagger|public|"
+                    r"webhook|forgot|reset|verify|otp|captcha)", re.I)
+
+
+def needs_signing_in(route, spec, presume=False):
+    """Does this operation require a signed-in caller — and how do we know?
+
+    The document's own word comes first: a security requirement on the
+    operation, or on the whole API unless the operation switches it off. Many
+    documents say nothing at all, though, while the API behind them is locked.
+    When told to presume, everything is taken to need signing in except what is
+    public by its very name — a login cannot require being logged in."""
+    doc = getattr(spec, "doc", None) or {}
+    operation = route.get("operation") or {}
+    declared = bool(doc.get("security")) or bool((doc.get("components") or {}).get("securitySchemes")) \
+        or any("security" in (op or {}) for item in (doc.get("paths") or {}).values()
+               if isinstance(item, dict) for op in item.values() if isinstance(op, dict))
+    if declared:
+        effective = operation["security"] if "security" in operation else doc.get("security")
+        return bool(effective), "the document says so"
+    if not presume:
+        return False, ""
+    named = f"{route['path']} {' '.join(route.get('tags') or [])} {route.get('operation_id') or ''}"
+    if PUBLIC.search(named):
+        return False, ""
+    return True, "presumed, because a server here is signed in to and the document does not say"
+
+
+def access_cases(spec, presume=False):
+    """Every protected operation, called by somebody who has not signed in.
+
+    The mistake this catches is the one that matters most and shows least: an
+    endpoint that was meant to be protected and is not. Nothing looks wrong —
+    it answers, correctly, to everyone. Each check leaves the credentials off
+    and expects to be refused; a write is sent with an empty body, so that even
+    where the door is open nothing is created by finding it out."""
+    out = []
+    for route in (spec.routes if spec is not None else []):
+        protected, why = needs_signing_in(route, spec, presume)
+        if not protected:
+            continue
+        path = route["path"]
+        for prm in (route.get("parameters") or []):
+            if prm.get("in") != "path":
+                continue
+            declared = resolve(prm.get("schema") or {}, spec)
+            branches = declared.get("anyOf") or declared.get("oneOf") or [declared]
+            real = next((resolve(b, spec) for b in branches
+                         if isinstance(b, dict) and b.get("type") != "null"), {})
+            value = "{{$uuid}}" if str(real.get("format") or "").lower() == "uuid" \
+                else "1" if real.get("type") in ("integer", "number") else "x"
+            path = path.replace("{%s}" % prm.get("name"), value)
+        path = re.sub(r"(?<!\{)\{[^{}]+\}(?!\})", "x", path)     # any left, but not {{$uuid}}
+        request = {"method": route["method"], "path": path, "anonymous": True}
+        if route["method"] in ("POST", "PUT", "PATCH"):
+            request["body"] = {}
+        out.append({
+            # /widgets and /widgets/{id} share a slug; the id has to tell them apart
+            "id": f"{slug(route)}{'-by-' + '-'.join(_one(x) for x in route['path_params']).replace('_', '-').lower() if route.get('path_params') else ''}-access",
+            "name": f"{route['key']} refuses a caller who has not signed in",
+            "levels": ["negative"], "tags": ["access", "generated"],
+            "priority": "P0",
+            "description": f"Calling {route['key']} without signing in is refused. "
+                           f"An endpoint that answers anyway is open to anyone. ({why[0].upper()}{why[1:]}.)",
+            "request": request,
+            "assertions": [{"type": "status", "in": [401, 403]}],
+            "generated": {"by": "blueprint", "kind": "access",
+                          "from": [route["key"]], "contract": contract_hash([route])},
+        })
+    return out
+
+
+KINDS = ("lifecycle", "contract", "omission", "parameter", "missing", "access")
 
 
 def fingerprint(test):
@@ -800,7 +873,7 @@ def load_index():
         return {}
 
 
-def build(spec, only=None, kinds=KINDS, name="derived", index=None):
+def build(spec, only=None, kinds=KINDS, name="derived", index=None, presume_protected=False):
     """Every lifecycle the document supports, as a suite document."""
     flows, skipped = [], []
     for key, slot in sorted(families(spec).items() if "lifecycle" in kinds else []):
@@ -829,6 +902,8 @@ def build(spec, only=None, kinds=KINDS, name="derived", index=None):
         cases += parameter_cases(spec)
     if "missing" in kinds:
         cases += missing_cases(spec)
+    if "access" in kinds:
+        cases += access_cases(spec, presume=presume_protected)
     if only:
         cases = [c for c in cases if re.search(only, c["id"])]
 

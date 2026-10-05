@@ -656,6 +656,8 @@ def promote(suite_name, ident, force=False):
 
 
 WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
+# what a server is signed in to with; left off when a test calls it as nobody
+CREDENTIAL_HEADERS = ("authorization", "cookie", "x-api-key", "x-auth-token", "api-key", "apikey")
 
 
 class Runner:
@@ -672,6 +674,15 @@ class Runner:
         # being careful.
         self.readonly = bool(readonly)
         self.env_name = env_name
+
+    def _is_the_mock(self):
+        try:
+            import environments as envmod
+            mock = envmod.resolve("${MOCK_BASE_URL}", []).rstrip("/")
+        except Exception:
+            mock = "http://localhost:4010"
+        same = lambda url: url.replace("127.0.0.1", "localhost").rstrip("/")   # noqa: E731
+        return str(self.env_name or "").startswith("mock") or same(self.base_url) == same(mock)
 
     # -- one request -------------------------------------------------------
     def _spec_check(self, request):
@@ -709,6 +720,27 @@ class Runner:
         query = interpolate(spec.get("query") or {}, scope)
         headers = {**self.headers, **interpolate(spec.get("headers") or {}, scope)}
         body = interpolate(spec.get("body"), scope) if spec.get("body") is not None else None
+
+        if spec.get("anonymous"):
+            # Call it as somebody who has not signed in: everything this server
+            # was given to sign in with is left off. A server that takes no
+            # sign-in at all has nothing to leave off, and calling it "open"
+            # would be a finding about our configuration, not about the API.
+            credentials = [k for k in self.headers if k.lower() in CREDENTIAL_HEADERS]
+            if not credentials and not self._is_the_mock():
+                return {
+                    "name": step.get("name") or f"{method} {path}",
+                    "role": step.get("role", "target"),
+                    "request": {"method": method, "url": self.base_url + str(path), "body": body},
+                    "status": None, "ms": 0,
+                    "checks": [{"ok": True, "label": "not applicable here",
+                                "detail": "this server is not signed in to, so there are no "
+                                          "credentials to leave off"}],
+                    "captured": {}, "outcome": SKIPPED, "response_excerpt": "",
+                    "response_json": None, "bindable": [], "refused": True,
+                }
+            headers = {k: v for k, v in headers.items() if k.lower() not in CREDENTIAL_HEADERS}
+            headers["X-Mock-Require-Auth"] = "1"       # the mock plays a server that demands it
 
         if self.readonly and method in WRITE_METHODS:
             where = f" ({self.env_name})" if self.env_name else ""

@@ -1783,7 +1783,112 @@ def group_trackers():
         server.shutdown()
 
 
+def group_access():
+    """Protected endpoints, called by somebody who has not signed in."""
+    import copy
+    import json as _json
+    import tempfile
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from pathlib import Path
+    import blueprint as b
+    import tests as t
+    import verdict as v
+    from mockd import Spec, build_app
+
+    ok = {"200": {"description": "ok", "content": {"application/json": {"schema": {"type": "object"}}}},
+          "401": {"description": "no"}}
+    uid = {"type": "string", "format": "uuid"}
+    doc = {"openapi": "3.1.0", "info": {"title": "W", "version": "1"},
+           "security": [{"bearer": []}],
+           "components": {"securitySchemes": {"bearer": {"type": "http", "scheme": "bearer"}}},
+           "paths": {
+               "/health": {"get": {"security": [], "responses": ok}},
+               "/widgets": {"get": {"responses": ok}, "post": {"responses": ok}},
+               "/widgets/{widget_id}": {"get": {"parameters": [
+                   {"name": "widget_id", "in": "path", "required": True, "schema": uid}],
+                   "responses": ok}}}}
+    spec = Spec(text=_json.dumps(doc), origin="w.json")
+    cases = {c["id"]: c for c in b.access_cases(spec)}
+    check("access: every operation the document protects gets a check, and the public one does not",
+          sorted(c["request"]["method"] + " " + c["request"]["path"] for c in cases.values()),
+          ["GET /widgets", "GET /widgets/{{$uuid}}", "POST /widgets"])
+    one = next(c for c in cases.values() if c["request"]["method"] == "POST")
+    check("access: it calls as nobody, expects to be refused, and is P0",
+          (one["request"].get("anonymous"), one["assertions"], one["priority"]),
+          (True, [{"type": "status", "in": [401, 403]}], "P0"))
+    check("access: a write is sent empty, so an open door creates nothing", one["request"].get("body"), {})
+    check("access: the checks are valid tests", [e for c in cases.values() for e in t.validate_test(c, "case")], [])
+
+    silent = copy.deepcopy(doc)
+    del silent["security"], silent["components"], silent["paths"]["/health"]["get"]["security"]
+    silent["paths"]["/auth/login"] = {"post": {"responses": ok}}
+    quiet = Spec(text=_json.dumps(silent), origin="q.json")
+    check("access: a document that says nothing about signing in yields no checks by itself",
+          b.access_cases(quiet), [])
+    presumed = sorted(c["request"]["method"] + " " + c["request"]["path"]
+                      for c in b.access_cases(quiet, presume=True))
+    check("access: told a server here is signed in to, it presumes — except what is public by name",
+          presumed, ["GET /widgets", "GET /widgets/{{$uuid}}", "POST /widgets"])
+
+    # the mock plays a server that demands signing in, for that one request
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "w.json"
+        path.write_text(_json.dumps(doc))
+        client = build_app(str(path), stateful=True, log_path=Path(tmp) / "r.jsonl")[0].test_client()
+        check("access: the mock lets anyone in as usual", client.get("/widgets").status_code, 200)
+        check("access: but refuses a marked request that brings no credentials",
+              client.get("/widgets", headers={"X-Mock-Require-Auth": "1"}).status_code, 401)
+        check("access: and not one that brings them",
+              client.get("/widgets", headers={"X-Mock-Require-Auth": "1",
+                                              "Authorization": "Bearer x"}).status_code, 200)
+
+    # the runner leaves the credentials off
+    class Real(BaseHTTPRequestHandler):
+        got = []
+
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            Real.got.append({k.lower(): val for k, val in self.headers.items()})
+            self.send_response(401 if "authorization" not in Real.got[-1] else 200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Real)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        case = cases["get-widgets-access"]
+        signed = t.Runner(base, {"Authorization": "Bearer real-secret", "X-Tenant": "acme"},
+                          verbose=False, env_name="dev")
+        done = signed.run_step(case, {})
+        sent = Real.got[-1]
+        check_true("access: the runner leaves the credential off, and nothing else",
+                   "authorization" not in sent and sent.get("x-tenant") == "acme", str(sent))
+        check("access: and the server's refusal is what the check wanted", done["status"], 401)
+        before = len(Real.got)
+        open_server = t.Runner(base, {}, verbose=False, env_name="public-demo")
+        skipped = open_server.run_step(case, {})
+        check("access: a server that is not signed in to is not called at all", len(Real.got), before)
+        check("access: and is reported as not applicable, not as open", skipped["outcome"], t.SKIPPED)
+    finally:
+        server.shutdown()
+
+    item = {"id": "get-widgets-access", "tags": ["access", "generated"], "outcome": "fail",
+            "steps": [{"outcome": "fail", "status": 200,
+                       "request": {"method": "GET", "url": "http://x/widgets"},
+                       "checks": [{"ok": False, "label": "status in [401, 403]"}]}]}
+    found = v.attribute(item) or {}
+    check("verdict: an endpoint that answers an unsigned caller is the API's to fix",
+          found.get("kind"), v.BACKEND_BROKE)
+    check_true("verdict: and it is said to be open to anyone", "open to anyone" in (found.get("next") or ""))
+
+
 GROUPS = {
+    "access": group_access,
     "trackers": group_trackers,
     "observe": group_observe,
     "impact": group_impact,

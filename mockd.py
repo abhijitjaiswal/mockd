@@ -1771,8 +1771,11 @@ def build_app(spec_path, stateful=False, log_path=Path("logs/requests.jsonl"),
         scenario = request.headers.get("X-Mock-Scenario")
         nulls = str(request.headers.get("X-Mock-Nulls", "")).lower() in ("1", "on", "true")
 
-        if require_auth and not forced and not request.headers.get("Authorization") \
-                and not request.cookies:
+        # X-Mock-Require-Auth asks for one request to be treated as a server that
+        # demands signing in would treat it — which is how a "call it with no
+        # credentials" check can pass on a mock that otherwise lets anyone in.
+        if (require_auth or request.headers.get("X-Mock-Require-Auth")) and not forced \
+                and not request.headers.get("Authorization") and not request.cookies:
             # Enforce it for EVERY operation. Only honouring it where the spec
             # documents a 401 meant --require-auth silently did nothing on 65 of
             # this spec's 96 operations — the ones that need testing most.

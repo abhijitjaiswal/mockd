@@ -574,7 +574,25 @@ def noticed():
                     continue
                 failing.setdefault(env, []).append(
                     f"{s.get('name')}|{s.get('_stage', 'shared')}|{x.get('id')}")
+    # ...and of those, the ones that matter most: an endpoint that answered
+    # somebody who had not signed in
+    access = {f"{s.get('name')}|{s.get('_stage', 'shared')}|{x.get('id')}"
+              for s in suites for x in (s.get("cases") or []) if "access" in (x.get("tags") or [])}
+    for env in sorted(failing):
+        opened = [k for k in failing[env] if k in access]
+        if env == "mock" or not opened:
+            continue
+        failing[env] = [k for k in failing[env] if k not in access]
+        n = len(opened)
+        out.append({"key": f"open-{env}", "level": "act",
+                    "title": f"{n} access check{'s' if n != 1 else ''} did not pass on {env}",
+                    "detail": "Each calls an endpoint without signing in and expects to be "
+                              "refused. One that answers anyway is open to anyone.",
+                    "action": {"label": "Show them", "go": "tests", "only": opened, "server": env,
+                               "label_for_filter": f"access checks that did not pass on {env}"}})
     for env, keys in sorted(failing.items(), key=lambda kv: (kv[0] == "mock", kv[0])):
+        if not keys:
+            continue
         n = len(keys)
         out.append({"key": f"failing-{env}", "level": "look",
                     "title": f"{n} test{'s' if n != 1 else ''} did not pass on {env} last time",
@@ -631,6 +649,25 @@ SELFCHECK = {"job": None, "started": None, "spec": None}
 BASELINE = {"last": None}
 
 
+def _some_server_signs_in():
+    """Is any real server here signed in to? If one is, the API is locked, and
+    a document that never says which endpoints need signing in is silent rather
+    than saying none do."""
+    try:
+        import environments as envmod
+        for name, env in envmod.load().items():
+            if name == "mock" or name.startswith("mock-"):
+                continue
+            if ((env.get("auth") or {}).get("mode") or "none") != "none":
+                return True
+            if any(str(k).lower() in ("cookie", "authorization", "x-api-key")
+                   for k in (env.get("headers") or {})):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _only_what_the_mock_can_show(cases):
     """Keep a not-found check only where the mock itself answers 404.
 
@@ -685,7 +722,8 @@ def refresh_baseline(reason="asked"):
     except Exception as exc:
         return {"ok": False, "error": f"could not read {spec_path}: {exc}"}
 
-    fresh, skipped = bp.build(spec, name="baseline", index=id_index("mock"))
+    fresh, skipped = bp.build(spec, name="baseline", index=id_index("mock"),
+                              presume_protected=_some_server_signs_in())
     fresh["cases"], left_out = _only_what_the_mock_can_show(fresh.get("cases") or [])
     existing = next((su for su in t.load_suites(include_drafts=True)
                      if su.get("name") == "baseline" and su.get("_stage") == "draft"), None)
