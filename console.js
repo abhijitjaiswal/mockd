@@ -2905,16 +2905,9 @@ $("envNewSave").addEventListener("click", async () => {
 let LAST_RUN = null;          // this tab's own run, so the download is yours
 
 $("testReport").addEventListener("click", () => {
-  const kind = prompt(
-    "Which report?\n\n  html  — open it, or send it to whoever asked\n"
-    + "  xml   — JUnit, for a CI server\n  json  — for a script",
-    "html");
-  if (!kind) return;
-  const wanted = kind.trim().toLowerCase();
-  if (!["html", "xml", "json"].includes(wanted)) {
-    banner("err", "html, xml or json.");
-    return;
-  }
+  // One press downloads the report a person can open. It used to ask you to
+  // type "html", "xml" or "json" into a browser prompt first.
+  const wanted = $("testReportKind").value || "html";
   // ask for THIS tab's run. Without the id you get whatever finished last,
   // which is somebody else's results whenever anything ran in between.
   window.location.href = `/api/tests/report.${wanted}`
@@ -3568,10 +3561,8 @@ $("docLoad").addEventListener("click", async () => {
       ({ data } = await api("/api/spec/upload", { method: "POST",
         body: JSON.stringify({ content: await file.text(), name: docName(file.name) }) }));
     } else {
-      let host = "document";
-      try { host = new URL(url).hostname; } catch { /* keep the default */ }
       ({ data } = await api("/api/spec/fetch", { method: "POST",
-        body: JSON.stringify({ url, headers: "", save_as: docName(host + ".json") }) }));
+        body: JSON.stringify({ url, headers: "", name_from_title: true }) }));
     }
     if (!data.ok) {
       banner("err", /not a usable/i.test(data.error || "")
@@ -3838,7 +3829,12 @@ async function homeLoad() {
   const specThere = !!spec && (proj.specs || []).includes(spec)
     || ((proj.modules || []).find((m) => m.module === "mock") || {}).exists;
   const running = !!state.running;
-  const ops = (state.drift || {}).spec_operations;
+  // the document the mock should be on, and the one it is actually on
+  const wanted = ((proj.modules || []).find((m) => m.module === "mock") || {}).spec || spec;
+  const serving = (state.options || {}).spec || "";
+  const stale = running && !!serving && !!wanted && serving !== wanted;
+  const sample = proj.from === "the built-in default";
+  const ops = stale ? null : (state.drift || {}).spec_operations;
   const verified = ((check.summary || {}).ok) || 0;
   const broken = check.failed_count || 0;
   const mine = (tax.modules || []).filter((m) => m.name !== "baseline")
@@ -3848,15 +3844,21 @@ async function homeLoad() {
   const ready = others.filter((e) => e.ready);
 
   const rows = [
-    { key: "spec", ok: specThere,
-      title: specThere ? "API document loaded" : "No API document yet",
-      note: specThere ? `${esc(spec)}${ops ? ` — ${ops} operations` : ""}`
+    { key: "spec", ok: specThere && !sample,
+      title: sample ? "You are on the built-in sample"
+        : specThere ? "API document loaded" : "No API document yet",
+      note: sample ? "Add your own API document — a file or a link — to work on your API. "
+                     + "Or start the mock below to look around with the sample."
+        : specThere ? `${esc(spec)}${ops ? ` — ${ops} endpoints` : ""}`
                       : "Everything starts from your API document (OpenAPI / Swagger). "
                         + "Give a file or a link.",
       action: ["Change", "source"], todo: ["Add your API document", "source"] },
-    { key: "mock", ok: running,
-      title: running ? "Mock server is running" : "Mock server is stopped",
-      note: running
+    { key: "mock", ok: running && !stale,
+      title: stale ? "The mock is running a different document"
+        : running ? "Mock server is running" : "Mock server is stopped",
+      todo: stale ? ["Restart the mock on it", "restart"] : ["Start the mock", "start"],
+      note: stale ? `It is answering from ${esc(serving)}; your API document is ${esc(wanted)}.`
+        : running
         ? `${esc(state.base_url || "")}`
           + (check.state === "done"
               ? (broken ? ` — ${broken} operation(s) do not match the document`
@@ -3864,16 +3866,20 @@ async function homeLoad() {
               : check.state === "running" ? " — checking itself against the document…" : "")
         : "The mock answers like your API would, so the app and the tests have "
           + "something to talk to today.",
-      action: ["Settings", "server"], todo: ["Start the mock", "start"] },
+      action: ["Settings", "server"] },
     { key: "baseline", ok: !!base.exists && !!mockRun && mockRun.other === 0,
       idle: !!base.exists && !mockRun,
       title: base.exists ? `${base.tests} baseline tests ready` : "Baseline tests not made yet",
       note: base.exists
         ? (mockRun ? `${mockRun.pass} of ${mockRun.pass + mockRun.other} passing on the mock.`
                    : "Made for you from the document. They have not been run yet.")
+        : stale ? "They are made once the mock is on your document."
+        : running ? "Being made now — this takes a few seconds."
         : "They are made automatically once the mock is running.",
-      action: ["Run them", "baseline"], todo: [base.exists ? "Run the baseline" : "Start the mock",
-                                               base.exists ? "baseline" : "start"] },
+      action: ["Run them", "baseline"],
+      todo: base.exists ? ["Run the baseline", "baseline"]
+        : stale ? ["Restart the mock on it", "restart"]
+        : running ? ["Check again", "refresh"] : ["Start the mock", "start"] },
     { key: "tests", ok: mine > 0, idle: mine === 0,
       title: mine ? `${mine} test${mine === 1 ? "" : "s"} of your own` : "No tests of your own yet",
       note: mine ? "Find, run and manage them under Tests."
@@ -3908,8 +3914,11 @@ async function homeLoad() {
   document.querySelectorAll('.view[data-view="home"] [data-homego]').forEach((b) =>
     b.addEventListener("click", async () => {
       const go = b.dataset.homego;
-      if (go === "start") {
-        b.disabled = true; b.textContent = "Starting…";
+      if (go === "refresh") { await homeLoad(); return; }
+      if (go === "start" || go === "restart") {
+        b.disabled = true; b.textContent = go === "restart" ? "Restarting…" : "Starting…";
+        if (go === "restart") { await stop(); }
+        if (wanted) $("spec").value = wanted;   // the project's document, whatever was typed before
         // Start it directly. Pressing the top-bar button from here did nothing
         // whenever the page still believed the mock was running — it had been
         // stopped somewhere else — because that button was disabled.
@@ -3922,7 +3931,16 @@ async function homeLoad() {
           await new Promise((r) => setTimeout(r, 1000));
         }
         await homeLoad();
-        setTimeout(homeLoad, 6000);       // once its self-check and baseline land
+        // The self-check and the baseline follow the start; how long depends on
+        // the size of the document, so watch for them instead of guessing.
+        (async () => {
+          for (let i = 0; i < 60; i++) {
+            await new Promise((r) => setTimeout(r, 2000));
+            const made = await get("/api/tests/baseline");
+            if (made.exists || (made.last && made.last.ok === false)) break;
+          }
+          if (document.querySelector('.view[data-view="home"]').classList.contains("on")) homeLoad();
+        })();
         return;
       }
       if (go === "baseline") { showView("tests"); setTimeout(() => $("baseRun").click(), 600); return; }
@@ -3988,9 +4006,18 @@ function libFillPickers() {
        ["P1", "P1 — main paths"], ["P2", "P2 — ordinary"], ["P3", "P3 — edges"]], LIB.priority);
   keep("libResult", [["", "Any result"], ["pass", "Passing"], ["fail", "Not passing"],
        ["never", "Never run"]], LIB.result);
-  if ($("testEnv").options.length && $("libEnv").options.length !== $("testEnv").options.length) {
-    $("libEnv").innerHTML = $("testEnv").innerHTML;
-    $("libEnv").value = $("testEnv").value;
+  // The servers a person set up, the mock first; the variants that exist to
+  // exercise sign-in handling stay in the advanced run panel.
+  const servers = (ENVS || []).filter((e) => !e.technical)
+    .sort((a, b) => (b.builtin - a.builtin) || (b.ready - a.ready) || a.name.localeCompare(b.name));
+  const html = servers.map((e) => `<option value="${esc(e.name)}"${e.ready ? "" : " disabled"}>`
+    + `${esc(e.name)} — ${esc(e.ready ? (e.base_url || "") : "not set up yet")}</option>`).join("");
+  if (servers.length && $("libEnv").dataset.html !== html) {
+    const was = $("libEnv").value;
+    $("libEnv").innerHTML = html;
+    $("libEnv").dataset.html = html;
+    $("libEnv").value = servers.some((e) => e.name === was && e.ready) ? was
+      : servers.some((e) => e.name === $("testEnv").value && e.ready) ? $("testEnv").value : "mock";
   }
 }
 
@@ -4201,9 +4228,11 @@ async function czLoad() {
 function czRender(d) {
   CZ.suite = d.suite; CZ.ids = (d.tests || []).map((t) => t.id);
   const all = d.total && d.passed === d.total;
+  const where = !d.env || d.env === "mock" ? "the mock" : d.env;
+  CZ.env = d.env || "mock";
   $("czDoneHead").textContent = !d.total ? "No tests came back."
-    : all ? `${d.total} test${d.total === 1 ? "" : "s"} created, and all pass on the mock.`
-    : d.tried ? `${d.total} test${d.total === 1 ? "" : "s"} created — ${d.passed} pass on the mock, `
+    : all ? `${d.total} test${d.total === 1 ? "" : "s"} created, and all pass on ${where}.`
+    : d.tried ? `${d.total} test${d.total === 1 ? "" : "s"} created — ${d.passed} pass on ${where}, `
                 + `${d.total - d.passed} need a look.`
     : `${d.total} test${d.total === 1 ? "" : "s"} created.`;
   $("czDoneNote").textContent = (d.tried ? "" : (d.untried_because || "") + " ")
@@ -4232,6 +4261,28 @@ function czRender(d) {
       } finally { b.disabled = false; }
     }));
 
+  // A test about the API's own rules cannot pass on the mock, and saying only
+  // "does not pass" leaves somebody rewriting a test that was right.
+  const others = (d.servers || []).filter((n) => n !== CZ.env);
+  const stuckOnMock = d.tried && CZ.env === "mock" && !all && !(d.needs || []).length;
+  $("czWhere").innerHTML = (stuckOnMock || CZ.env !== "mock") && d.total ? `
+    <div class="czneed">
+      ${stuckOnMock ? `<b>This may not be the tests' fault.</b> The mock answers in the right
+        shape, but it does not do your API's own rules — what a total comes to, what stock is
+        left, what is refused the second time. Tests about those are settled on a real server.`
+        : `Tried on <b>${esc(CZ.env)}</b>.`}
+      <div class="btnrow" style="margin-top:8px">
+        ${others.map((n) => `<button class="sm${stuckOnMock ? " primary" : ""}" data-cztry="${esc(n)}">Try them on ${esc(n)}</button>`).join("")}
+        ${CZ.env !== "mock" ? '<button class="sm" data-cztry="mock">Try them on the mock</button>' : ""}
+        ${stuckOnMock && !others.length
+          ? '<button class="sm" data-czservers>Set up a server</button>' : ""}
+      </div>
+    </div>` : "";
+  $("czWhere").querySelectorAll("[data-cztry]").forEach((b) =>
+    b.addEventListener("click", () => czTry(b.dataset.cztry, b)));
+  const setup = $("czWhere").querySelector("[data-czservers]");
+  if (setup) setup.addEventListener("click", () => showView("environments"));
+
   $("czList").innerHTML = (d.tests || []).map((t) => {
     const cls = t.outcome === "pass" ? "pass" : (t.needs || []).length ? "wait" : "bad";
     const mark = t.outcome === "pass" ? "passes" : (t.needs || []).length ? "waiting"
@@ -4247,6 +4298,19 @@ function czRender(d) {
   czShow("done");
 }
 
+async function czTry(env, button) {
+  if (button) { button.disabled = true; button.textContent = "Trying…"; }
+  try {
+    const { data } = await api("/api/create/try", { method: "POST",
+      body: JSON.stringify({ suite: CZ.suite, ids: CZ.ids, env }) });
+    if (!data.ok) { banner("err", data.error || "could not try them"); return; }
+    czRender(data);
+    const where = env === "mock" ? "the mock" : env;
+    banner(data.passed === data.total ? "ok" : "err",
+           `${data.passed} of ${data.total} pass on ${where}.`);
+  } finally { if (button && button.isConnected) { button.disabled = false; } }
+}
+
 async function czFinish(payload, noteEl) {
   if (noteEl) noteEl.textContent = "checking them and trying each one on the mock…";
   const { data } = await api("/api/create/finish", { method: "POST",
@@ -4260,8 +4324,9 @@ async function czFinish(payload, noteEl) {
     return false;
   }
   czRender(data);
-  banner(data.passed === data.total ? "ok" : "err",
-         `${data.total} test${data.total === 1 ? "" : "s"} created in ${data.suite}.`);
+  // Creating them worked, whatever the first try said — the page says the rest.
+  banner("ok", `${data.total} test${data.total === 1 ? "" : "s"} created in ${data.suite}.`);
+  loadTests();                       // so the sidebar count includes them now
   return true;
 }
 
@@ -4332,9 +4397,7 @@ $("czOpen").addEventListener("click", () => showView("tests"));
 $("czRetry").addEventListener("click", async () => {
   $("czRetry").disabled = true;
   try {
-    const { data } = await api("/api/create/value", { method: "POST",
-      body: JSON.stringify({ suite: CZ.suite, ids: CZ.ids, name: "", value: "-" }) });
-    if (data.ok) czRender(data);
+    await czTry(CZ.env || "mock");
   } finally { $("czRetry").disabled = false; }
 });
 $("czDiscard").addEventListener("click", async () => {

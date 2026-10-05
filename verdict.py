@@ -118,6 +118,16 @@ def attribute(item, spec=None, history=None, provenance=None):
     details = " ".join(c.get("detail", "") for c in checks)
     route = _route_for(spec, failed)
 
+    # A generated "ask for an id nothing has" test that gets a success back is
+    # not about this environment's data: the id was invented a moment ago and
+    # exists nowhere. The document says 404 and the API said something else.
+    if ("missing" in (item.get("tags") or []) or str(item.get("id") or "").endswith("-missing")) \
+            and status is not None and 200 <= int(status) < 300:
+        evidence.append(f"asked for an id that nothing has; the document says 404 "
+                        f"and it answered {status}")
+        return _verdict(BACKEND_BROKE, evidence,
+                        "Something that does not exist should be answered with 404.")
+
     # 3. A status the document never mentions, or a body that breaks its own
     #    schema, is the provider contradicting itself.
     if route is not None and status is not None:

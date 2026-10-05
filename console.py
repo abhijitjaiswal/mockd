@@ -262,7 +262,10 @@ def load_preferences():
     try:
         saved = json.loads(PREFS_FILE.read_text())
     except (OSError, ValueError):
-        return {}
+        # Nothing remembered yet is the state of every new install. Returning
+        # nothing at all left the page on its built-in sample, so somebody who
+        # had just loaded their own document and pressed Start got the sample.
+        saved = {}
     keep = {k: v for k, v in saved.items() if k in REMEMBERED} if isinstance(saved, dict) else {}
     keep["spec"] = project.active_spec(None, "mock")      # always the project's answer
     return keep
@@ -448,6 +451,38 @@ SELFCHECK = {"job": None, "started": None, "spec": None}
 BASELINE = {"last": None}
 
 
+def _only_what_the_mock_can_show(cases):
+    """Keep a not-found check only where the mock itself answers 404.
+
+    The baseline is first of all proof that the mock is faithful, so it has to
+    be able to pass there. For a collection the mock holds, an id nothing has
+    is a 404, as documented. For one it cannot hold — a read served from a
+    hand-written sample, say — every id gets that sample, and a check that can
+    never pass on the mock would sit red for ever and teach people to ignore
+    red. Asked of the running mock rather than guessed, because whether it
+    holds a collection depends on what it was seeded with."""
+    if not mock.running:
+        return cases, []
+    import urllib.error
+    import urllib.request
+    kept, left_out = [], []
+    for case in cases:
+        if ((case.get("generated") or {}).get("kind")) != "missing":
+            kept.append(case)
+            continue
+        path = str((case.get("request") or {}).get("path") or "")
+        url = mock.base_url() + path.replace("{{$uuid}}", str(uuid.uuid4()))
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                status = resp.status
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+        except Exception:
+            status = 404                  # could not ask; keep the check
+        (kept if status == 404 else left_out).append(case if status == 404 else case.get("id"))
+    return kept, left_out
+
+
 def refresh_baseline(reason="asked"):
     """Derive the baseline suite from the project spec and merge it into what
     is saved — so the tests that prove each integration point exist before
@@ -471,6 +506,7 @@ def refresh_baseline(reason="asked"):
         return {"ok": False, "error": f"could not read {spec_path}: {exc}"}
 
     fresh, skipped = bp.build(spec, name="baseline", index=id_index("mock"))
+    fresh["cases"], left_out = _only_what_the_mock_can_show(fresh.get("cases") or [])
     existing = next((su for su in t.load_suites(include_drafts=True)
                      if su.get("name") == "baseline" and su.get("_stage") == "draft"), None)
     merged, done = bp.merge(existing, fresh)
@@ -498,6 +534,7 @@ def refresh_baseline(reason="asked"):
               "flows": len(merged.get("scenarios") or []),
               "cases": len(merged.get("cases") or []),
               "skipped_resources": [{"resource": n, "why": w} for n, w in skipped],
+              "left_out": left_out,
               "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **done}
     BASELINE["last"] = result
     return result
@@ -1020,6 +1057,14 @@ def spec_fetch():
 
     SPEC_DIR.mkdir(exist_ok=True)
     name = payload.get("save_as") or "fetched.json"
+    if payload.get("name_from_title"):
+        # called after the document, not after the machine it was fetched from:
+        # "localhost.json" says nothing a week later
+        title = speclock.summarise(text).get("title") or ""
+        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:48]
+        name = f"{slug or 'document'}.json"
+        if project.active_spec() == f"specs/{name}":
+            name = "new-" + name          # never write over the one in use unasked
     if not re.fullmatch(r"[A-Za-z0-9._-]+\.(json|ya?ml)", name):
         return jsonify({"ok": False, "error": "save_as must be a simple file name"}), 400
     path = SPEC_DIR / name
@@ -2151,16 +2196,23 @@ PLAIN = {
 }
 
 
-def _trial(suite_name, ids):
-    """Run just these tests against the mock and say, in plain words, how each
-    one did. A new test nobody has tried is a guess; this is what turns it into
-    something a person can decide about."""
+def _trial(suite_name, ids, env=None):
+    """Run just these tests and say, in plain words, how each one did. A new
+    test nobody has tried is a guess; this is what turns it into something a
+    person can decide about.
+
+    On the mock unless a server is named. The mock answers in the documented
+    shape but knows none of the API's own rules — what a total comes to, what
+    is refused the second time — so a test about those can only be settled on
+    a real server, and the screen offers exactly that."""
     import tests as t
-    if not mock.running:
+    on_mock = not env or env == "mock"
+    if on_mock and not mock.running:
         return None, "the mock is not running, so the new tests have not been tried yet"
     out = LOG_DIR / f"trial-{uuid.uuid4().hex[:8]}.json"
     only = "^(" + "|".join(re.escape(i) for i in ids) + ")( |$)"
-    cmd = [sys.executable, str(HERE / "tests.py"), "run", "--base-url", mock.base_url(),
+    target = ["--base-url", mock.base_url()] if on_mock else ["--env", env]
+    cmd = [sys.executable, str(HERE / "tests.py"), "run", *target,
            "--drafts-only", "--suite", suite_name, "--only", only, "--json", str(out)]
     try:
         subprocess.run(cmd, cwd=str(HERE), capture_output=True, text=True, timeout=180)
@@ -2179,13 +2231,14 @@ def _trial(suite_name, ids):
     return results, None
 
 
-def _explain(item):
+def _explain(item, where_ran="mock"):
     """One test's outcome as a sentence a non-engineer can act on."""
+    on_mock = where_ran == "mock"
     if item is None:
         return "not tried", "It was not run."
     outcome = item.get("outcome") or "error"
     if outcome == "pass":
-        return outcome, PLAIN["pass"]
+        return outcome, PLAIN["pass"] if on_mock else f"Works on {where_ran}."
     first = None
     for step in item.get("steps") or []:
         for check in step.get("checks") or []:
@@ -2197,6 +2250,12 @@ def _explain(item):
             break
     verdict = (item.get("verdict") or {}).get("headline") or PLAIN.get(outcome) or \
         "Does not pass yet."
+    if on_mock and outcome == "fail":
+        # Whose fault a failure is means something against a real server. The
+        # mock not knowing a business rule is nobody's fault, and "the test
+        # asserts something the spec never promised" was said of a 409 the
+        # document does promise.
+        verdict = "Does not pass on the mock"
     if item.get("error"):
         return outcome, f"{verdict} {item['error']}"
     if first:
@@ -2206,20 +2265,39 @@ def _explain(item):
     return outcome, verdict
 
 
-def _created_summary(suite_name, ids, notes=None):
+def _servers_to_try():
+    """Real servers a new test could be tried on: set up, and safe to write to."""
+    try:
+        import environments as envmod
+        out = []
+        for name, env in sorted(envmod.load().items()):
+            if name == "mock" or name.startswith("mock-") or env.get("readonly"):
+                continue
+            missing = []
+            envmod.resolve({"base_url": env.get("base_url"), "auth": env.get("auth"),
+                            "headers": env.get("headers")}, missing)
+            if not missing:
+                out.append(name)
+        return out
+    except Exception:
+        return []
+
+
+def _created_summary(suite_name, ids, notes=None, env=None):
     """Everything the Create screen shows after tests exist: fixed up, tried on
     the mock, and described in plain words."""
     import tests as t
+    where_ran = env if env and env != "mock" else "mock"
     suite = next((su for su in t.load_suites(include_drafts=True)
                   if su.get("name") == suite_name and su.get("_stage") == "draft"), None)
     if suite is None:
         return {"ok": False, "error": f"the suite {suite_name!r} is not there"}
     wanted = [x for x in (suite.get("scenarios") or []) + (suite.get("cases") or [])
               if x.get("id") in set(ids)]
-    results, problem = _trial(suite_name, [x.get("id") for x in wanted])
+    results, problem = _trial(suite_name, [x.get("id") for x in wanted], env=env)
     rows, needs = [], {}
     for test in wanted:
-        outcome, words = _explain((results or {}).get(test.get("id"))) \
+        outcome, words = _explain((results or {}).get(test.get("id")), where_ran) \
             if results is not None else ("untried", problem)
         missing = [name for name, value in (test.get("data") or {}).items()
                    if isinstance(value, str) and t.PLACEHOLDER.match(value.strip())]
@@ -2236,7 +2314,18 @@ def _created_summary(suite_name, ids, notes=None):
     passed = sum(1 for r in rows if r["outcome"] == "pass")
     return {"ok": True, "suite": suite_name, "tests": rows, "passed": passed,
             "total": len(rows), "needs": [{"name": n, "tests": ts} for n, ts in needs.items()],
-            "notes": notes or [], "tried": results is not None, "untried_because": problem}
+            "notes": notes or [], "tried": results is not None, "untried_because": problem,
+            "env": where_ran, "servers": _servers_to_try()}
+
+
+@app.post("/api/create/try")
+def create_try():
+    """Try the tests just created again — on the mock, or on a named server."""
+    payload = request.get_json(silent=True) or {}
+    env = (payload.get("env") or "mock").strip()
+    if env != "mock" and env not in _servers_to_try():
+        return jsonify({"ok": False, "error": f"{env} is not set up, or is read only"}), 200
+    return jsonify(_created_summary(payload.get("suite"), payload.get("ids") or [], env=env))
 
 
 @app.get("/api/create/context")

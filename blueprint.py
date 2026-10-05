@@ -213,15 +213,49 @@ def id_path_in(schema, spec, prefix="", depth=0):
     if depth > 4 or not isinstance(schema, dict):
         return None
     props = schema.get("properties") or {}
-    for name, sub in props.items():
-        low = str(name).lower()
-        if low in ID_KEYS or low.endswith("_id"):
-            real = resolve(sub, spec)
-            if real.get("type") in ("string", "integer", None):
-                return f"{prefix}{name}"
+    # the row's own id first: a book lists author_id too, and capturing that
+    # as "the book's id" reads back somebody else's row
+    for own in (True, False):
+        for name, sub in props.items():
+            low = str(name).lower()
+            if (low in ID_KEYS) if own else low.endswith("_id"):
+                real = resolve(sub, spec)
+                if real.get("type") in ("string", "integer", None):
+                    return f"{prefix}{name}"
     for name, sub in props.items():
         deeper = id_path_in(sub, spec, f"{prefix}{name}.", depth + 1)
         if deeper:
+            return deeper
+    return None
+
+
+def list_path_in(schema, spec, prefix="", depth=0):
+    """Where the rows sit in a declared list response: "" when the answer is
+    the list itself, "items" for {items, total}, "data.items" for an envelope.
+    None when the document does not say — the caller then asserts nothing about
+    it rather than assume one team's convention holds for every API."""
+    schema = resolve(schema, spec)
+    if depth > 4 or not isinstance(schema, dict):
+        return None
+    for comb in ("anyOf", "oneOf"):
+        if schema.get(comb):
+            for branch in schema[comb]:
+                real = resolve(branch, spec)
+                if isinstance(real, dict) and real.get("type") != "null":
+                    found = list_path_in(real, spec, prefix, depth + 1)
+                    if found is not None:
+                        return found
+            return None
+    if schema.get("type") == "array" or "items" in schema and "properties" not in schema:
+        return prefix.rstrip(".")
+    props = schema.get("properties") or {}
+    for name, sub in props.items():
+        real = resolve(sub, spec)
+        if isinstance(real, dict) and real.get("type") == "array":
+            return f"{prefix}{name}"
+    for name, sub in props.items():
+        deeper = list_path_in(sub, spec, f"{prefix}{name}.", depth + 1)
+        if deeper is not None:
             return deeper
     return None
 
@@ -388,17 +422,27 @@ def lifecycle(key, slot, spec, index=None):
     path, from_schema = capture_path(create, spec)
     rng = random.Random(create["key"])
     name = "-".join(key)
+    # how a person would say it: "an author", not "a authors"
+    thing = " ".join([*key[:-1], _one(key[-1])]).replace("-", " ").replace("_", " ")
+    a_thing = f"{'an' if thing[:1] in 'aeiou' else 'a'} {thing}"
     used = [create] + item_routes + ([slot["list"]] if slot.get("list") else [])
+
+    # Every step also holds the answer to the shape the document declares for
+    # it. Checking only the status let a read that returned price as text sail
+    # through a flow whose whole point is that the API does what it says.
+    def shaped(route):
+        return [{"type": "schema"}] if declares_schema(route, spec) else []
 
     steps = []
     body = request_body(create, spec, rng)
     steps.append({
-        "role": "step", "name": f"create a {name}",
+        "role": "step", "name": f"create {a_thing}",
         "request": {"method": create["method"], "path": create["path"],
                     **({"body": body} if body is not None else {})},
         "assertions": [
             {"type": "status", "in": success_codes(create, (200, 201))},
             {"type": "jsonpath", "path": path, "op": "not_null"},
+            *shaped(create),
         ],
         "capture": {variable: path},
     })
@@ -413,6 +457,7 @@ def lifecycle(key, slot, spec, index=None):
                 # the read returns the thing we just made, not merely something
                 {"type": "jsonpath", "path": path, "op": "equals",
                  "value": "{{%s}}" % variable},
+                *shaped(read),
             ],
         })
 
@@ -423,17 +468,20 @@ def lifecycle(key, slot, spec, index=None):
             "role": "step", "name": "change it",
             "request": {"method": upd["method"], "path": bound_path(upd["path"], variable),
                         **({"body": upd_body} if upd_body is not None else {})},
-            "assertions": [{"type": "status", "in": success_codes(upd)}],
+            "assertions": [{"type": "status", "in": success_codes(upd)}, *shaped(upd)],
         })
 
     if slot.get("list"):
         lst = slot["list"]
+        rows = list_path_in(success_schema(lst, spec), spec)
         steps.append({
             "role": "step", "name": f"it appears in the {name} list",
             "request": {"method": "GET", "path": lst["path"]},
             "assertions": [
                 {"type": "status", "in": success_codes(lst)},
-                {"type": "jsonpath", "path": "data", "op": "not_empty"},
+                *([{"type": "jsonpath", "path": rows or "$", "op": "not_empty"}]
+                  if rows is not None else []),
+                *shaped(lst),
             ],
         })
 
@@ -456,7 +504,7 @@ def lifecycle(key, slot, spec, index=None):
             })
         # belt and braces: if the flow fails before its own delete, this still runs
         cleanup.append({
-            "name": f"remove the {name} if the flow did not",
+            "name": f"remove the {thing} if the flow did not",
             "request": {"method": "DELETE",
                         "path": bound_path(dele["path"], variable)},
         })
@@ -466,13 +514,14 @@ def lifecycle(key, slot, spec, index=None):
 
     flow = {
         "id": f"{name.replace('/', '-')}-lifecycle",
-        "name": f"a {name} can be created, used and removed",
+        "name": f"{a_thing} can be created, used and removed",
         "kind": "e2e",
         "levels": ["sanity"],
         "tags": ["lifecycle", "generated"],
         "priority": "P1",
-        "description": f"A {name} can be created, read back, changed, found in the "
-                       f"list and removed — the whole life of one record.",
+        "description": f"{a_thing[0].upper()}{a_thing[1:]} can be created, read back, "
+                       f"changed, found in the list and removed — the whole life of "
+                       f"one record.",
         "steps": steps,
         "generated": {
             "by": "blueprint",
@@ -637,7 +686,48 @@ def parameter_cases(spec):
     return out
 
 
-KINDS = ("lifecycle", "contract", "omission", "parameter")
+def missing_cases(spec):
+    """Asking for one thing by an id nothing has.
+
+    The document says 404. A server that answers 200 with nothing, or 500, has
+    left every caller to work out for itself that the thing is not there — and
+    a flow that deletes and then looks only proves this for resources that can
+    be deleted."""
+    out = []
+    for route in (spec.routes if spec is not None else []):
+        params = path_params(route["path"])
+        if route["method"] != "GET" or len(params) != 1 \
+                or "404" not in {str(c) for c in route["responses"]}:
+            continue
+        declared = next((resolve(prm.get("schema") or {}, spec)
+                         for prm in (route.get("parameters") or [])
+                         if prm.get("in") == "path" and prm.get("name") == params[0]), {})
+        branches = declared.get("anyOf") or declared.get("oneOf") or [declared]
+        real = next((resolve(b, spec) for b in branches
+                     if isinstance(b, dict) and b.get("type") != "null"), {})
+        if str(real.get("format") or "").lower() == "uuid":
+            absent = "{{$uuid}}"
+        elif real.get("type") == "integer":
+            absent = "999999999"
+        else:
+            continue                  # a free-text key: no way to know what is absent
+        out.append({
+            "id": f"{slug(route)}-missing",
+            "name": f"{route['key']} says 404 for an id nothing has",
+            "levels": ["negative"], "tags": ["missing", "generated"],
+            "priority": "P2",
+            "description": f"Asking {route['key']} for something that does not exist "
+                           f"is answered with 404, as the API document says.",
+            "request": {"method": "GET",
+                        "path": route["path"].replace("{%s}" % params[0], absent)},
+            "assertions": [{"type": "status", "equals": 404}],
+            "generated": {"by": "blueprint", "kind": "missing",
+                          "from": [route["key"]], "contract": contract_hash([route])},
+        })
+    return out
+
+
+KINDS = ("lifecycle", "contract", "omission", "parameter", "missing")
 
 
 def fingerprint(test):
@@ -737,6 +827,8 @@ def build(spec, only=None, kinds=KINDS, name="derived", index=None):
         cases += omission_cases(spec)
     if "parameter" in kinds:
         cases += parameter_cases(spec)
+    if "missing" in kinds:
+        cases += missing_cases(spec)
     if only:
         cases = [c for c in cases if re.search(only, c["id"])]
 

@@ -910,6 +910,50 @@ def satisfies_contract(route, status, body):
     return not next(_Validator(schema).iter_errors(body), None)
 
 
+def fill_required(schema, value, seed="", depth=0):
+    """Give a stored row the fields its documented shape requires and it lacks.
+
+    A row made by POST holds what the caller sent. The document usually requires
+    more of the answer — an id, a created_at — which a real server adds itself.
+    Without them the row fails its own contract, and the mock used to respond
+    by discarding it and inventing an unrelated object: you created "N" and were
+    handed "Alpha Echo" with a different id, which nothing could then read back.
+
+    Fills in place, so the row keeps the same values on every later read, and
+    only ever adds: a field that is present but wrong is left for the contract
+    check to refuse."""
+    if not isinstance(schema, dict) or depth > 20:
+        return value
+    for comb in ("anyOf", "oneOf"):
+        if schema.get(comb):
+            for branch in schema[comb]:
+                if not isinstance(branch, dict) or branch.get("type") == "null":
+                    continue
+                kind = branch.get("type") or ("object" if "properties" in branch else None)
+                if (kind == "object" and isinstance(value, dict)) \
+                        or (kind == "array" and isinstance(value, list)):
+                    return fill_required(branch, value, seed, depth + 1)
+            return value
+    if schema.get("allOf"):
+        for part in schema["allOf"]:
+            fill_required(part, value, seed, depth + 1)
+        return value
+    if isinstance(value, dict):
+        props = schema.get("properties") or {}
+        own = str(value.get("id") or seed)
+        for name in schema.get("required") or []:
+            if name not in value and name in props:
+                value[name] = generate_from_schema(
+                    props[name], random.Random(f"{own}:{name}"), name)
+        for name, sub in props.items():
+            if isinstance(value.get(name), (dict, list)):
+                fill_required(sub, value[name], f"{own}:{name}", depth + 1)
+    elif isinstance(value, list) and isinstance(schema.get("items"), dict):
+        for i, item in enumerate(value):
+            fill_required(schema["items"], item, f"{seed}:{i}", depth + 1)
+    return value
+
+
 def body_source(route, overlay: Overlay):
     """What /_mock/routes reports, so gaps are visible without probing."""
     status = _success_status(route["responses"])
@@ -1602,7 +1646,10 @@ def build_app(spec_path, stateful=False, log_path=Path("logs/requests.jsonl"),
     store = StateStore()
     log_ring = []
     app = Flask("mockd")
-    CORS(app, expose_headers=["X-Mock-Source", "X-Mock-Operation", "X-Mock-Generation"])
+    # supports_credentials: an app that signs in with a cookie sends its requests
+    # "with credentials", and a browser discards the answer unless told it may.
+    CORS(app, supports_credentials=True,
+         expose_headers=["X-Mock-Source", "X-Mock-Operation", "X-Mock-Generation"])
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     def seed(watcher):
@@ -1703,6 +1750,13 @@ def build_app(spec_path, stateful=False, log_path=Path("logs/requests.jsonl"),
         if delay and str(delay).isdigit():
             time.sleep(min(int(delay), 30000) / 1000.0)
 
+        if route is None and request.method == "OPTIONS":
+            # A browser asks permission before any cross-origin POST, PUT or
+            # DELETE, and before any request carrying a token. No document
+            # lists OPTIONS, so this used to answer 404 — with the right CORS
+            # headers on it, which a browser still treats as a refusal. An app
+            # running on another port could read from the mock and never write.
+            return "", 204
         if route is None:
             entry["status"] = 404
             record(entry)
@@ -1797,6 +1851,10 @@ def build_app(spec_path, stateful=False, log_path=Path("logs/requests.jsonl"),
                 body = synth.wrap_like_spec(
                     route, code, body, store.last_message(route, code),
                     reference=overlay.get(route["key"], code)[1])
+                declared = (((route["responses"].get(str(code)) or {}).get("content") or {})
+                            .get("application/json") or {}).get("schema")
+                if declared and not satisfies_contract(route, code, body):
+                    fill_required(declared, body, route["key"])
 
             # The document decides, for every method. Serving a stored object
             # through an operation that declares a different shape — or a status

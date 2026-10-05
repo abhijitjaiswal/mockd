@@ -2056,9 +2056,22 @@ def operation_brief(route, sample=None, limit=900):
     if others:
         lines.append(f"    also documents: {', '.join(others)}")
     if sample is not None:
-        lines.append("    a real response:")
-        lines.append(_indent(json.dumps(sample, indent=2)[:limit], 6))
+        # One row of each list says everything two rows do, and fits. Cutting
+        # the text at a character count instead left a JSON fragment that ended
+        # mid-object — the one part of the brief presented as real, and broken.
+        text = json.dumps(_first_rows(sample), indent=2)
+        lines.append("    a real response (lists shortened to their first row):")
+        lines.append(_indent(text if len(text) <= limit
+                             else text[:limit].rsplit("\n", 1)[0] + "\n… (cut short)", 6))
     return "\n".join(lines)
+
+
+def _first_rows(value, depth=0):
+    if isinstance(value, list):
+        return [_first_rows(v, depth + 1) for v in value[:1]]
+    if isinstance(value, dict) and depth < 12:
+        return {k: _first_rows(v, depth + 1) for k, v in value.items()}
+    return value
 
 
 def _indent(text, spaces):
@@ -2229,9 +2242,29 @@ def relevant_routes(spec, story, limit=8, details=False):
         if score > 0:
             scored.append((score, len(route["path"]), route, hits))
     scored.sort(key=lambda row: (-row[0], row[1]))
+    chosen = scored[:limit]
+
+    # A story that makes or lists something nearly always goes on to look at
+    # one of them — "place an order and check the book's stock" needs the read
+    # of one book, which shares no more words with the story than the list does
+    # and so fell just outside the cut. Bring the read-one of each chosen
+    # collection along; it is one more operation, not a different subject.
+    taken = {id(row[2]) for row in chosen}
+    extra = []
+    for _, _, route, _ in chosen:
+        if route.get("path_params"):
+            continue
+        base = route["path"].rstrip("/")
+        for other in routes:
+            if id(other) in taken or other["method"] != "GET":
+                continue
+            if re.fullmatch(re.escape(base) + r"/\{[^/{}]+\}", other["path"]):
+                taken.add(id(other))
+                extra.append((0.0, len(other["path"]), other, []))
+    chosen = chosen + extra[:3]
     if details:
-        return [(route, score, hits) for score, _, route, hits in scored[:limit]]
-    return [route for _, _, route, _ in scored[:limit]]
+        return [(route, score, hits) for score, _, route, hits in chosen]
+    return [route for _, _, route, _ in chosen]
 
 
 def story_is_about_this_api(spec, story, share=0.25):
@@ -2598,6 +2631,11 @@ def bug_report(item, suite_name, meta=None):
             request = step.get("request") or {}
             mark = {"pass": "ok", "blocked": "not reached"}.get(step.get("outcome"),
                                                                "FAILED")
+            if not request.get("url"):
+                # never sent, so there is no request to quote; an empty pair of
+                # backticks reads as something having gone wrong with the report
+                out += [f"{number}. {step.get('name') or ''} — not reached"]
+                continue
             out += [f"{number}. {step.get('name') or ''} — "
                     f"`{request.get('method', '')} {request.get('url', '')}` → "
                     f"{step.get('status') or 'no response'} ({mark})"]

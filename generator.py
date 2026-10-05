@@ -209,6 +209,90 @@ def _pick_branch(branches, want_null):
     return (real or nulls or [{}])[0]
 
 
+_CLASS_SHORTHAND = {"d": string.digits, "w": string.ascii_lowercase + string.digits + "_",
+                    "s": " "}
+
+
+def _class_members(spec):
+    """The characters a [...] class allows; None for a negated or odd one."""
+    if spec.startswith("^"):
+        return None
+    out, i = [], 0
+    while i < len(spec):
+        ch = spec[i]
+        if ch == "\\" and i + 1 < len(spec):
+            nxt = spec[i + 1]
+            out.extend(_CLASS_SHORTHAND.get(nxt, nxt))
+            i += 2
+        elif i + 2 < len(spec) and spec[i + 1] == "-":
+            lo, hi = ord(ch), ord(spec[i + 2])
+            if lo > hi:
+                return None
+            out.extend(chr(c) for c in range(lo, hi + 1))
+            i += 3
+        else:
+            out.append(ch)
+            i += 1
+    return out or None
+
+
+def string_matching(pattern, rng):
+    """A string the pattern accepts, for the everyday patterns people write —
+    classes, escapes, literals and counts: ^[0-9]{13}$, ^[A-Z]{2}-\\d{4}$.
+    Returns None for anything cleverer (groups, alternation, lookarounds)
+    rather than guess; the result is always checked against the pattern."""
+    body = pattern[1:] if pattern.startswith("^") else pattern
+    body = body[:-1] if body.endswith("$") and not body.endswith("\\$") else body
+    out, i = [], 0
+    while i < len(body):
+        ch = body[i]
+        if ch in "(|)":
+            return None
+        if ch == "[":
+            end = body.find("]", i + 2)
+            if end < 0:
+                return None
+            pool = _class_members(body[i + 1:end])
+            i = end + 1
+        elif ch == "\\":
+            if i + 1 >= len(body):
+                return None
+            nxt = body[i + 1]
+            if nxt in "bBAZ":
+                return None
+            pool = list(_CLASS_SHORTHAND.get(nxt, nxt))
+            i += 2
+        elif ch == ".":
+            pool, i = list(string.ascii_lowercase), i + 1
+        elif ch in "*+?{":
+            return None                          # a count with nothing to count
+        else:
+            pool, i = [ch], i + 1
+        if not pool:
+            return None
+        low = high = 1
+        if i < len(body) and body[i] in "*+?":
+            low, high = {"*": (0, 3), "+": (1, 4), "?": (0, 1)}[body[i]]
+            i += 1
+        elif i < len(body) and body[i] == "{":
+            end = body.find("}", i)
+            parts = body[i + 1:end].split(",") if end > 0 else []
+            if not parts or not parts[0].strip().isdigit():
+                return None
+            low = int(parts[0])
+            high = low if len(parts) == 1 else (int(parts[1]) if parts[1].strip().isdigit()
+                                                else low + 3)
+            i = end + 1
+        if i < len(body) and body[i] == "?":
+            i += 1                               # a lazy count matches the same strings
+        out.append("".join(rng.choice(pool) for _ in range(max(low, min(high, low + 3)))))
+    value = "".join(out)
+    try:
+        return value if re.search(pattern, value) else None
+    except re.error:
+        return None
+
+
 def generate_from_schema(schema, rng: random.Random, field="", depth=0,
                          nulls=False, array_items=2):
     if not isinstance(schema, dict) or depth > 30:
@@ -281,6 +365,12 @@ def generate_from_schema(schema, rng: random.Random, field="", depth=0,
         return out
 
     if t == "string":
+        if schema.get("pattern") and not schema.get("format"):
+            # A value that ignores the pattern is refused by every server that
+            # enforces it, and by this mock's own request validation.
+            shaped = string_matching(str(schema["pattern"]), rng)
+            if shaped is not None:
+                return shaped
         val = _string_by_format(schema.get("format", ""), rng) or _string_by_name(field, rng)
         if val is None:
             base = schema.get("title") or field or "string"

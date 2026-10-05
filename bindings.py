@@ -198,10 +198,17 @@ def candidates(field, index, limit=4):
     # only be reached by first obtaining some other id is a worse answer than the
     # resource's own id from a collection you can simply call: both are correct,
     # one is usable. Strength still decides between equals.
+    #
+    # And among confirmed answers, the resource's own collection before a
+    # mention of it somewhere else. A book exists in /books before any order
+    # can name it; reading book_id out of the orders list works only on a server
+    # that already has orders, so the first run against a fresh one sent an
+    # empty id. An unconfirmed guess never outranks a confirmed answer.
     order = {CERTAIN: 0, STRONG: 1, WEAK: 2}
     found.sort(key=lambda c: (1 if c.get("needs_id") else 0,
-                              order.get(c["strength"], 9),
+                              1 if c["strength"] == WEAK else 0,
                               0 if c.get("about_it") else 1,
+                              order.get(c["strength"], 9),
                               -len(c.get("shared") or []), len(c["path"])))
     out, taken = [], set()
     for c in found:

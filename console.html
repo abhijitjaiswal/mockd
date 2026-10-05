@@ -899,6 +899,7 @@
           <p class="czbig" id="czDoneHead"></p>
           <p class="hint" id="czDoneNote"></p>
           <div id="czNeeds"></div>
+          <div id="czWhere"></div>
           <div id="czList"></div>
           <div class="btnrow" style="margin-top:14px">
             <button class="primary" id="czMore">Create more</button>
@@ -958,6 +959,11 @@
     <div class="card" id="testOutCard" hidden>
           <h3>Result <span class="grow"></span>
             <span class="tag" id="testProgress"></span>
+            <select id="testReportKind" class="sm" style="width:auto" title="what the report is for">
+              <option value="html">to read or send (HTML)</option>
+              <option value="xml">for a CI server (JUnit)</option>
+              <option value="json">for a script (JSON)</option>
+            </select>
             <button class="sm" id="testReport">Download report</button>
           <button class="sm" id="testRaw">Raw log</button></h3>
           <div id="testOutHead" class="banner" hidden></div>

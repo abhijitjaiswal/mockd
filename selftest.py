@@ -1224,7 +1224,114 @@ def group_blocked():
           roles([{}, {}], kind="e2e"), ["step", "step"])
 
 
+def group_plain_rest():
+    """An API that answers with the bare object — no envelope — which is how
+    most are written. Everything here was found by pointing the tool at a
+    product it had never seen."""
+    import json as _json
+    import random
+    import re
+    import tempfile
+    from pathlib import Path
+    import bindings as bd
+    import blueprint as b
+    import generator as g
+    import verdict as v
+    from mockd import Spec, build_app
+
+    uid = {"type": "string", "format": "uuid"}
+    widget = {"type": "object", "required": ["id", "name", "created_at"], "properties": {
+        "id": uid, "name": {"type": "string"},
+        "created_at": {"type": "string", "format": "date-time"}}}
+    listing = {"type": "object", "required": ["items", "total"], "properties": {
+        "items": {"type": "array", "items": widget}, "total": {"type": "integer"}}}
+    err = {"description": "no", "content": {"application/json": {"schema": {
+        "type": "object", "properties": {"detail": {"type": "string"}}}}}}
+    ok = lambda sch, d="ok": {"description": d, "content": {"application/json": {"schema": sch}}}
+    doc = {"openapi": "3.1.0", "info": {"title": "W", "version": "1"}, "paths": {
+        "/widgets": {
+            "get": {"responses": {"200": ok(listing)}},
+            "post": {"requestBody": {"content": {"application/json": {"schema": {
+                        "type": "object", "required": ["name"],
+                        "properties": {"name": {"type": "string"}}}}}},
+                     "responses": {"201": ok(widget), "422": err}}},
+        "/widgets/{widget_id}": {
+            "get": {"parameters": [{"name": "widget_id", "in": "path", "required": True,
+                                    "schema": uid}],
+                    "responses": {"200": ok(widget), "404": err}}}}}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "w.json"
+        path.write_text(_json.dumps(doc))
+        app, _ = build_app(str(path), stateful=True, log_path=Path(tmp) / "r.jsonl")[:2]
+        c = app.test_client()
+        made = c.post("/widgets", json={"name": "mine"})
+        body = made.get_json() or {}
+        check("rest: create answers the documented 201", made.status_code, 201)
+        check("rest: with what was sent, not an invented row", body.get("name"), "mine")
+        check_true("rest: and the fields a server adds itself", bool(body.get("created_at")),
+                   str(body))
+        back = c.get(f"/widgets/{body.get('id')}")
+        check("rest: it reads back", back.status_code, 200)
+        check("rest: as the same row", (back.get_json() or {}).get("name"), "mine")
+        check("rest: with the same server-made value each time",
+              (back.get_json() or {}).get("created_at"), body.get("created_at"))
+        rows = (c.get("/widgets").get_json() or {}).get("items") or []
+        check_true("rest: and it is in the list", any(r.get("id") == body.get("id") for r in rows),
+                   str(rows)[:200])
+        check("rest: an id nothing has is the documented 404",
+              c.get("/widgets/00000000-0000-4000-8000-00000000dead").status_code, 404)
+        ask = c.open("/widgets", method="OPTIONS", headers={
+            "Origin": "http://localhost:3000", "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type"})
+        check_true("rest: a browser's permission request is granted, not 404",
+                   200 <= ask.status_code < 300, str(ask.status_code))
+        check("rest: for the origin that asked", ask.headers.get("Access-Control-Allow-Origin"),
+              "http://localhost:3000")
+
+        spec = Spec(text=_json.dumps(doc), origin="w.json")
+        check("rest: the rows of a list are found where the document puts them",
+              b.list_path_in(b.success_schema(spec.match("GET", "/widgets")[0], spec), spec),
+              "items")
+        suite, _ = b.build(spec, name="baseline")
+        flow = next(iter(suite.get("scenarios") or []), {})
+        check("rest: a flow is named the way a person would say it",
+              flow.get("name"), "a widget can be created, used and removed")
+        read = next((st for st in flow.get("steps") or [] if st["name"] == "read it back"), {})
+        check_true("rest: each step is held to the documented shape, not just a status",
+                   {"type": "schema"} in (read.get("assertions") or []), str(read)[:200])
+        missing = [x for x in suite.get("cases") or [] if x["id"].endswith("-missing")]
+        check("rest: an id nothing has gets its own check", len(missing), 1)
+        check("rest: which expects 404",
+              (missing or [{}])[0].get("assertions"), [{"type": "status", "equals": 404}])
+
+    rng = random.Random(3)
+    for pattern in (r"^[0-9]{13}$", r"^[A-Z]{2}-\d{4}$", r"^[a-z0-9_-]+$"):
+        value = g.string_matching(pattern, rng)
+        check_true(f"pattern: a value is made that {pattern} accepts",
+                   value is not None and re.search(pattern, value) is not None, str(value))
+    check("pattern: one it cannot read is declined, not guessed",
+          g.string_matching(r"^(a|b)+$", rng), None)
+    check_true("pattern: a generated field honours it",
+               re.fullmatch(r"[0-9]{13}", g.generate_from_schema(
+                   {"type": "string", "pattern": "^[0-9]{13}$"}, rng, "isbn") or "") is not None)
+
+    index = {"widget_id": [("GET /orders", "items[0].lines[0].widget_id")],
+             "id": [("GET /widgets", "items[0].id"), ("GET /orders", "items[0].id")]}
+    first = (bd.candidates("widget_id", index) or [{}])[0]
+    check("ids: a thing's own list is preferred to a mention of it elsewhere",
+          first.get("operation"), "GET /widgets")
+
+    item = {"id": "get-widgets-missing", "tags": ["missing", "generated"], "outcome": "fail",
+            "steps": [{"outcome": "fail", "status": 200,
+                       "request": {"method": "GET", "url": "http://x/widgets/abc"},
+                       "checks": [{"ok": False, "label": "status is 404"}]}]}
+    check("verdict: a 200 for an id nothing has is the API's to fix",
+          (v.attribute(item) or {}).get("kind"), v.BACKEND_BROKE)
+
+
 GROUPS = {
+    "plain_rest": group_plain_rest,
     "classification": group_classification,
     "taxonomy": group_taxonomy,
     "selection": group_selection,
