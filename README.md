@@ -29,6 +29,32 @@ Three programs, one spec:
 | `blueprint.py` | the baseline: tests derived from the document, so every endpoint is checked before anyone writes one |
 | `mcp_server.py` | mockd as tools an AI assistant can call, so it can write and run tests itself |
 
+## See it work
+
+Two recordings of mockd used against an API it had never seen — a small
+bookshop service with its own Swagger page and a token. Each step is captioned
+on screen. They play here; the links give the full-quality video, which can be
+paused.
+
+**From an API document to bugs found** — 3 min 43 s ·
+[download the video](docs/recordings/mockd-end-to-end.mp4)
+
+Load the document from a link, start the mock, run the tests nobody wrote, add
+the real server, write a test from a sentence — then the same tests find three
+bugs in a new build, and one becomes a bug report.
+
+![mockd used end to end, with a caption for each step](docs/recordings/mockd-end-to-end.gif)
+
+**An AI tool writing the tests itself, over MCP** — 2 min 28 s ·
+[download the video](docs/recordings/mockd-mcp.mp4)
+
+Connect an AI tool once, ask in a sentence, and watch what it asks mockd and
+what mockd answers — including a first attempt that is refused, and corrected.
+The assistant's part is played by a script in this recording; every call and
+every answer is real.
+
+![an AI tool calling mockd's tools to write, save and run tests](docs/recordings/mockd-mcp.gif)
+
 ## Setup
 
 The only prerequisite is **Python 3.9 or newer**. One script does the rest on
@@ -1106,6 +1132,7 @@ project.py           which document the project is about (mockd.json)
 speclock.py          pins the agreed version of the document; specdiff.py compares two
 selftest.py          checks of the code itself — python selftest.py
 demo/                browser suites that click through the console (Playwright)
+docs/recordings/     the two recordings shown at the top of this file
 tests/               shared suites — committed, run by CI
 tests/drafts/        the draft workspace — gitignored, yours until proven; also
                      where imported and generated tests land
