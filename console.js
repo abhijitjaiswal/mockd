@@ -30,6 +30,7 @@ function showView(name) {
   window.scrollTo(0, 0);
   if (name === "tests") { loadTests(); fillTestSelectors(); fillTypeList();
                          loadBindings(); fillBindSuites(); loadBaseline(); }
+  if (name === "create") czLoad();
   if (name === "source") loadProjectSpec();
   if (name === "explore" && !ROUTES.length && RUNNING) loadRoutes();
   if (name === "authoring" && !GUIDE) { loadRules(); loadGuide(); }
@@ -3480,6 +3481,206 @@ $("bindRefresh").addEventListener("click", loadBindings);
 
 /* Fix a suite in place rather than regenerating it: the tests somebody already
    reviewed keep their shape, and only the placeholder ids change. */
+/* ------------------------------------------------------------ create tests
+   One path from a sentence to tests that have been tried. Everything a person
+   used to do by hand afterwards — check the JSON, fix the ids, run it once to
+   see — happens before they are shown anything, so what they read is a list of
+   tests and how each one did, not machinery. */
+let CZ = { suite: null, ids: [], job: null, brief: "", stop: false };
+
+function czShow(stage) {
+  for (const id of ["czAsk", "czWait", "czPaste", "czDone"]) {
+    $(id).hidden = id !== ({ ask: "czAsk", wait: "czWait", paste: "czPaste",
+                             done: "czDone" })[stage];
+  }
+  const step = { ask: "ask", wait: "write", paste: "write", done: "done" }[stage];
+  $("czSteps").querySelectorAll("span").forEach((el) =>
+    el.classList.toggle("on", el.dataset.s === step));
+}
+
+async function czLoad() {
+  let d;
+  try { ({ data: d } = await api("/api/create/context")); } catch { return; }
+  $("czBaseline").innerHTML = d.baseline
+    ? `<b>${d.baseline} baseline tests</b> were already made for you from the API `
+      + `document — you do not need to write checks that each endpoint answers. `
+      + `Use this for what <i>you</i> want proven.`
+    : "Start the mock and a baseline of tests is made for you. Use this for what "
+      + "<i>you</i> want proven.";
+  $("czExamples").innerHTML = (d.examples || []).map((e) =>
+    `<button type="button" class="chip" data-eg="${esc(e)}">${esc(e)}</button>`).join("");
+  $("czExamples").querySelectorAll("[data-eg]").forEach((b) =>
+    b.addEventListener("click", () => { $("czStory").value = b.dataset.eg; $("czStory").focus(); }));
+  $("czModules").innerHTML = (d.modules || []).map((m) =>
+    `<option value="${esc(m)}">`).join("");
+
+  const gens = d.generators || {};
+  const options = [];
+  if (gens.claude) options.push(["claude", "Claude writes them for me",
+    "Runs on this computer. Takes two to five minutes."]);
+  if (gens.codex) options.push(["codex", "Codex writes them for me",
+    "Runs on this computer. Usually faster, sometimes less thorough."]);
+  options.push(["", "I will use my own AI tool",
+    "You get a prompt to copy into ChatGPT or similar, then paste its answer back."]);
+  const keep = (document.querySelector('input[name="czVia"]:checked') || {}).value;
+  $("czWriters").innerHTML = options.map(([value, title, note], i) => `
+    <label class="${(keep === undefined ? i === 0 : keep === value) ? "on" : ""}">
+      <input type="radio" name="czVia" value="${esc(value)}"
+             ${(keep === undefined ? i === 0 : keep === value) ? "checked" : ""}>
+      <span>${esc(title)}<small>${esc(note)}</small></span></label>`).join("");
+  $("czWriters").querySelectorAll("input").forEach((r) =>
+    r.addEventListener("change", () => $("czWriters").querySelectorAll("label")
+      .forEach((l) => l.classList.toggle("on", l.querySelector("input").checked))));
+  $("czGoNote").textContent = d.mock_running ? ""
+    : "The mock is not running, so new tests will be saved but not tried yet.";
+}
+
+function czRender(d) {
+  CZ.suite = d.suite; CZ.ids = (d.tests || []).map((t) => t.id);
+  const all = d.total && d.passed === d.total;
+  $("czDoneHead").textContent = !d.total ? "No tests came back."
+    : all ? `${d.total} test${d.total === 1 ? "" : "s"} created, and all pass on the mock.`
+    : d.tried ? `${d.total} test${d.total === 1 ? "" : "s"} created — ${d.passed} pass on the mock, `
+                + `${d.total - d.passed} need a look.`
+    : `${d.total} test${d.total === 1 ? "" : "s"} created.`;
+  $("czDoneNote").textContent = (d.tried ? "" : (d.untried_because || "") + " ")
+    + `Saved under “${d.suite}”. They are yours to edit, run on any server, or remove.`;
+
+  $("czNeeds").innerHTML = (d.needs || []).map((n) => `
+    <div class="czneed">
+      <b>One thing only you know:</b> a real value for <code>${esc(n.name)}</code>.
+      Nothing in the API document says where it comes from.
+      <div class="row" style="margin-top:7px;align-items:end">
+        <div style="flex:1"><input type="text" data-need="${esc(n.name)}"
+             placeholder="paste the value"></div>
+        <div><button class="sm" data-needsave="${esc(n.name)}">Use it and try again</button></div>
+      </div>
+    </div>`).join("");
+  $("czNeeds").querySelectorAll("[data-needsave]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const name = b.dataset.needsave;
+      const value = $("czNeeds").querySelector(`[data-need="${CSS.escape(name)}"]`).value.trim();
+      b.disabled = true;
+      try {
+        const { data } = await api("/api/create/value", { method: "POST",
+          body: JSON.stringify({ suite: CZ.suite, ids: CZ.ids, name, value }) });
+        if (!data.ok) { banner("err", data.error); return; }
+        czRender(data);
+      } finally { b.disabled = false; }
+    }));
+
+  $("czList").innerHTML = (d.tests || []).map((t) => {
+    const cls = t.outcome === "pass" ? "pass" : (t.needs || []).length ? "wait" : "bad";
+    const mark = t.outcome === "pass" ? "passes" : (t.needs || []).length ? "waiting"
+      : t.outcome === "untried" ? "not tried" : "does not pass";
+    return `<div class="cztest ${cls}" data-cz="${esc(t.id)}">
+      <div class="top"><span class="prio ${esc(t.priority)}">${esc(t.priority)}</span>
+        <span class="nm">${esc(t.name)}</span><span class="grow"></span>
+        <span class="tag">${esc(mark)}</span></div>
+      ${t.description ? `<div class="recmeta">${esc(t.description)}</div>` : ""}
+      <div class="recmeta">${t.steps} step${t.steps === 1 ? "" : "s"} · ${(t.levels || []).map(esc).join(", ")}</div>
+      <div class="say">${esc(t.words)}</div></div>`;
+  }).join("");
+  czShow("done");
+}
+
+async function czFinish(payload, noteEl) {
+  if (noteEl) noteEl.textContent = "checking them and trying each one on the mock…";
+  const { data } = await api("/api/create/finish", { method: "POST",
+    body: JSON.stringify({ ...payload, story: $("czStory").value.trim(),
+                           module: $("czModule").value.trim() }) });
+  if (noteEl) noteEl.textContent = "";
+  if (!data.ok) {
+    const extra = (data.errors || []).slice(0, 4).join("  ·  ");
+    banner("err", data.error + (extra ? "  " + extra : ""));
+    if (noteEl) noteEl.textContent = extra || data.detail || "";
+    return false;
+  }
+  czRender(data);
+  banner(data.passed === data.total ? "ok" : "err",
+         `${data.total} test${data.total === 1 ? "" : "s"} created in ${data.suite}.`);
+  return true;
+}
+
+$("czGo").addEventListener("click", async () => {
+  const story = $("czStory").value.trim();
+  if (story.length < 12) { banner("err", "Say what you want to test, in a sentence or two."); return; }
+  const via = (document.querySelector('input[name="czVia"]:checked') || {}).value || "";
+  $("czGo").disabled = true;
+  $("czGoNote").textContent = "reading your API document…";
+  try {
+    const { data } = await api("/api/tests/generate", { method: "POST",
+      body: JSON.stringify({ story, via, module: $("czModule").value.trim(),
+                             refine: via === "claude" }) });
+    if (!data.ok) { banner("err", data.error); $("czGoNote").textContent = data.error; return; }
+    $("czGoNote").textContent = "";
+    CZ.brief = data.brief || "";
+    if (!via) {
+      $("czPrompt").textContent = CZ.brief; $("czReply").value = "";
+      $("czCopyNote").textContent = ""; $("czCheckNote").textContent = "";
+      czShow("paste");
+      return;
+    }
+    CZ.job = data.job; CZ.stop = false;
+    $("czWaitHead").textContent = `${via === "claude" ? "Claude" : "Codex"} is writing your tests…`;
+    czShow("wait");
+    const started = Date.now();
+    let finished = false;
+    for (let i = 0; i < 1200 && !CZ.stop; i++) {
+      let status;
+      try { ({ data: status } = await api(`/api/job/${data.job}`)); } catch { break; }
+      if (status && status.done) { finished = true; break; }
+      const secs = Math.round((Date.now() - started) / 1000);
+      $("czWaitNote").textContent = `${secs}s so far. Two to five minutes is normal — `
+        + `it is reading your whole API document. You can leave this open.`;
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    if (CZ.stop) { czShow("ask"); return; }
+    if (!finished) {
+      banner("err", "That took too long. Use your own AI tool instead — the prompt is ready.");
+      $("czPrompt").textContent = CZ.brief; czShow("paste");
+      return;
+    }
+    $("czWaitHead").textContent = "Checking the tests and trying each one…";
+    const ok = await czFinish({ job: data.job }, $("czWaitNote"));
+    if (!ok) { $("czPrompt").textContent = CZ.brief; czShow("paste"); }
+  } finally { $("czGo").disabled = false; }
+});
+
+$("czCancel").addEventListener("click", async () => {
+  CZ.stop = true;
+  if (CZ.job) { try { await api(`/api/job/${CZ.job}/cancel`, { method: "POST" }); } catch { /* gone */ } }
+  czShow("ask");
+});
+$("czCopy").addEventListener("click", () => {
+  copyText($("czPrompt").textContent, $("czCopy"));
+  $("czCopyNote").textContent = "Copied. Paste it into your AI tool and send it.";
+});
+$("czBack").addEventListener("click", () => czShow("ask"));
+$("czCheck").addEventListener("click", async () => {
+  const reply = $("czReply").value.trim();
+  if (!reply) { banner("err", "Paste the answer first."); return; }
+  $("czCheck").disabled = true;
+  try { await czFinish({ reply }, $("czCheckNote")); }
+  finally { $("czCheck").disabled = false; }
+});
+$("czMore").addEventListener("click", () => { $("czStory").value = ""; czShow("ask"); czLoad(); });
+$("czOpen").addEventListener("click", () => showView("tests"));
+$("czRetry").addEventListener("click", async () => {
+  $("czRetry").disabled = true;
+  try {
+    const { data } = await api("/api/create/value", { method: "POST",
+      body: JSON.stringify({ suite: CZ.suite, ids: CZ.ids, name: "", value: "-" }) });
+    if (data.ok) czRender(data);
+  } finally { $("czRetry").disabled = false; }
+});
+$("czDiscard").addEventListener("click", async () => {
+  const { data } = await api("/api/create/discard", { method: "POST",
+    body: JSON.stringify({ suite: CZ.suite, ids: CZ.ids }) });
+  banner("ok", `Removed ${data.removed || 0} test${data.removed === 1 ? "" : "s"}.`);
+  czShow("ask"); czLoad();
+});
+
 /* The tests nobody had to write. They exist as soon as a spec is loaded, so the
    first thing a new person can do is press one button and see every
    integration point answer. */

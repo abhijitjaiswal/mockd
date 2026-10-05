@@ -2095,6 +2095,248 @@ def build_story_brief(story, criteria=None):
                         id_index=id_index())
 
 
+# ----------------------------------------------------------------------------
+# Create tests: one path from a sentence to tests that have been tried
+# ----------------------------------------------------------------------------
+
+PLAIN = {
+    "pass": "Works on the mock.",
+    "blocked": "Could not get as far as the thing being tested — an earlier step failed.",
+    "error": "Could not be run as written.",
+}
+
+
+def _trial(suite_name, ids):
+    """Run just these tests against the mock and say, in plain words, how each
+    one did. A new test nobody has tried is a guess; this is what turns it into
+    something a person can decide about."""
+    import tests as t
+    if not mock.running:
+        return None, "the mock is not running, so the new tests have not been tried yet"
+    out = LOG_DIR / f"trial-{uuid.uuid4().hex[:8]}.json"
+    only = "^(" + "|".join(re.escape(i) for i in ids) + ")( |$)"
+    cmd = [sys.executable, str(HERE / "tests.py"), "run", "--base-url", mock.base_url(),
+           "--drafts-only", "--suite", suite_name, "--only", only, "--json", str(out)]
+    try:
+        subprocess.run(cmd, cwd=str(HERE), capture_output=True, text=True, timeout=180)
+        report = json.loads(out.read_text())
+    except Exception as exc:
+        return None, f"the trial run did not finish: {exc}"
+    finally:
+        try:
+            out.unlink()
+        except OSError:
+            pass
+    results = {}
+    for suite in report.get("suites") or []:
+        for item in suite.get("results") or []:
+            results[item.get("id")] = item
+    return results, None
+
+
+def _explain(item):
+    """One test's outcome as a sentence a non-engineer can act on."""
+    if item is None:
+        return "not tried", "It was not run."
+    outcome = item.get("outcome") or "error"
+    if outcome == "pass":
+        return outcome, PLAIN["pass"]
+    first = None
+    for step in item.get("steps") or []:
+        for check in step.get("checks") or []:
+            if not check.get("ok"):
+                first = (step.get("name") or "", check.get("label") or "",
+                         check.get("why") or check.get("detail") or "")
+                break
+        if first:
+            break
+    verdict = (item.get("verdict") or {}).get("headline") or PLAIN.get(outcome) or \
+        "Does not pass yet."
+    if item.get("error"):
+        return outcome, f"{verdict} {item['error']}"
+    if first:
+        where = f' At "{first[0]}":' if first[0] else ""
+        detail = f" {first[1]}" + (f" — {first[2]}" if first[2] else "")
+        return outcome, f"{verdict}.{where}{detail}"[:420]
+    return outcome, verdict
+
+
+def _created_summary(suite_name, ids, notes=None):
+    """Everything the Create screen shows after tests exist: fixed up, tried on
+    the mock, and described in plain words."""
+    import tests as t
+    suite = next((su for su in t.load_suites(include_drafts=True)
+                  if su.get("name") == suite_name and su.get("_stage") == "draft"), None)
+    if suite is None:
+        return {"ok": False, "error": f"the suite {suite_name!r} is not there"}
+    wanted = [x for x in (suite.get("scenarios") or []) + (suite.get("cases") or [])
+              if x.get("id") in set(ids)]
+    results, problem = _trial(suite_name, [x.get("id") for x in wanted])
+    rows, needs = [], {}
+    for test in wanted:
+        outcome, words = _explain((results or {}).get(test.get("id"))) \
+            if results is not None else ("untried", problem)
+        missing = [name for name, value in (test.get("data") or {}).items()
+                   if isinstance(value, str) and t.PLACEHOLDER.match(value.strip())]
+        for name in missing:
+            needs.setdefault(name, []).append(test.get("id"))
+        if missing and outcome != "pass":
+            words = ("Needs a real value for " + ", ".join(missing)
+                     + " before it can pass. " + words)
+        rows.append({"id": test.get("id"), "name": test.get("name") or test.get("id"),
+                     "kind": test.get("kind") or ("flow" if "steps" in test else "check"),
+                     "steps": len(test.get("steps") or []) or 1,
+                     **t.record_of(test), "levels": t.levels_of(test),
+                     "outcome": outcome, "words": words, "needs": missing})
+    passed = sum(1 for r in rows if r["outcome"] == "pass")
+    return {"ok": True, "suite": suite_name, "tests": rows, "passed": passed,
+            "total": len(rows), "needs": [{"name": n, "tests": ts} for n, ts in needs.items()],
+            "notes": notes or [], "tried": results is not None, "untried_because": problem}
+
+
+@app.get("/api/create/context")
+def create_context():
+    """What the Create screen needs to greet somebody: what can write tests
+    here, what already exists, and a few things they could ask for."""
+    import tests as t
+    examples = []
+    try:
+        import blueprint as bp
+        spec = load_project_spec()
+        for key, slot in sorted(bp.families(spec).items()):
+            if not slot.get("create"):
+                continue
+            thing = key[-1].rstrip("s").replace("-", " ")
+            if slot.get("read") or slot.get("list"):
+                examples.append(f"Create a {thing} and check it can be read back")
+            if len(examples) >= 4:
+                break
+    except Exception:
+        pass
+    baseline = next((su for su in t.load_suites(include_drafts=True)
+                     if su.get("name") == "baseline"), None)
+    return jsonify({
+        "generators": generator_available(),
+        "mock_running": bool(mock.running),
+        "baseline": (len((baseline or {}).get("cases") or [])
+                     + len((baseline or {}).get("scenarios") or [])) if baseline else 0,
+        "examples": examples[:4],
+        "modules": sorted({su.get("name") for su in t.load_suites(include_drafts=True)
+                           if su.get("name") != "baseline"})})
+
+
+@app.post("/api/create/finish")
+def create_finish():
+    """Take what came back — from a generator job or pasted in — and make it
+    ready: validated, saved, ids fixed up, tried once."""
+    import tests as t
+    payload = request.get_json(silent=True) or {}
+    reply, via, story = payload.get("reply") or "", "paste", payload.get("story") or ""
+    job_id = payload.get("job")
+    if job_id:
+        meta, job = GENERATED.get(job_id), JOBS.get(job_id)
+        if not meta or not job:
+            return jsonify({"ok": False, "error": "that generation is not here any more"}), 200
+        if not job.get("done"):
+            return jsonify({"ok": False, "error": "still writing"}), 200
+        via, story = meta.get("via"), meta.get("story") or story
+        if meta.get("out") and Path(meta["out"]).exists():
+            reply = Path(meta["out"]).read_text()
+        if not reply.strip():
+            reply = "\n".join(job.get("lines") or [])
+    parsed, problem = _json_from(reply)
+    if problem:
+        return jsonify({"ok": False, "error":
+                        "That does not contain the tests as JSON. Copy the whole reply, "
+                        "from the first [ to the last ].", "detail": problem}), 200
+
+    module = (payload.get("module") or "").strip()
+    if module and not re.fullmatch(r"[A-Za-z0-9._-]+", module):
+        return jsonify({"ok": False, "error":
+                        "A module name can only use letters, numbers, dots, dashes "
+                        "and underscores."}), 200
+    suite_name = module or _unique_suite(story)
+    written = t.import_tests(parsed, suite_name, stage="draft")
+    if not written.get("ok"):
+        return jsonify({"ok": False, "error": "The tests were not saved, because some "
+                        "of them are not valid.", "errors": written.get("errors") or []}), 200
+
+    items = parsed if isinstance(parsed, list) else (
+        (parsed.get("cases") or []) + (parsed.get("scenarios") or [])
+        if isinstance(parsed, dict) and ("cases" in parsed or "scenarios" in parsed)
+        else [parsed])
+    ids = [x.get("id") for x in items if isinstance(x, dict) and x.get("id")]
+
+    # fix up ids the way a person would have to by hand
+    notes = []
+    index = id_index()
+    suite = next((su for su in t.load_suites(include_drafts=True)
+                  if su.get("name") == suite_name and su.get("_stage") == "draft"), None)
+    if suite is not None and index:
+        touched = False
+        for test in (suite.get("scenarios") or []) + (suite.get("cases") or []):
+            if test.get("id") not in ids:
+                continue
+            changed, said = t.rebind_placeholders(test, index)
+            touched = touched or changed
+            notes += said
+        still_valid = not [e for test in (suite.get("scenarios") or [])
+                           for e in t.validate_test(
+                               {**test, "data": {**(suite.get("data") or {}),
+                                                 **(test.get("data") or {})}}, "scenario")]
+        if touched and still_valid:
+            t.save_suite(suite, stage="draft")
+    summary = _created_summary(suite_name, ids, notes)
+    summary["via"] = via
+    return jsonify(summary)
+
+
+@app.post("/api/create/value")
+def create_value():
+    """Supply a real value for something the tests could not find for
+    themselves, then try them again."""
+    import tests as t
+    payload = request.get_json(silent=True) or {}
+    suite_name, name = payload.get("suite"), (payload.get("name") or "").strip()
+    value = (payload.get("value") or "").strip()
+    ids = payload.get("ids") or []
+    if not value:
+        return jsonify({"ok": False, "error": "Type the value first."}), 200
+    suite = next((su for su in t.load_suites(include_drafts=True)
+                  if su.get("name") == suite_name and su.get("_stage") == "draft"), None)
+    if suite is None:
+        return jsonify({"ok": False, "error": "that suite is not there"}), 200
+    for test in (suite.get("scenarios") or []) + (suite.get("cases") or []):
+        if test.get("id") in ids and name in (test.get("data") or {}):
+            test["data"][name] = value
+    t.save_suite(suite, stage="draft")
+    return jsonify(_created_summary(suite_name, ids))
+
+
+@app.post("/api/create/discard")
+def create_discard():
+    """Throw away tests that were just made and are not wanted."""
+    import tests as t
+    payload = request.get_json(silent=True) or {}
+    suite_name, ids = payload.get("suite"), set(payload.get("ids") or [])
+    suite = next((su for su in t.load_suites(include_drafts=True)
+                  if su.get("name") == suite_name and su.get("_stage") == "draft"), None)
+    if suite is None:
+        return jsonify({"ok": True, "removed": 0})
+    before = len(suite.get("cases") or []) + len(suite.get("scenarios") or [])
+    suite["cases"] = [c for c in (suite.get("cases") or []) if c.get("id") not in ids]
+    suite["scenarios"] = [c for c in (suite.get("scenarios") or []) if c.get("id") not in ids]
+    left = len(suite["cases"]) + len(suite["scenarios"])
+    if left:
+        t.save_suite(suite, stage="draft")
+    elif suite.get("_path"):
+        try:
+            Path(suite["_path"]).unlink()
+        except OSError:
+            pass
+    return jsonify({"ok": True, "removed": before - left})
+
+
 @app.post("/api/tests/story")
 def tests_story():
     """A brief for turning a user story into tests, to paste into an assistant.

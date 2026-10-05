@@ -362,6 +362,25 @@
             margin-bottom:11px;background:var(--bg)}
   .stepedit h5{margin:0 0 7px;font-size:12px;font-weight:650;display:flex;gap:8px;
                align-items:center}
+  .czbig{font-size:15px;font-weight:600;margin:0 0 6px 0;display:block}
+  .czsteps{display:inline-flex;gap:6px;font-size:11.5px;font-weight:500}
+  .czsteps span{padding:2px 9px;border-radius:999px;border:1px solid var(--line);
+                color:var(--muted)}
+  .czsteps span.on{border-color:var(--accent,#3b6cf6);color:var(--accent,#3b6cf6)}
+  .czwriters{display:grid;gap:7px}
+  .czwriters label{display:flex;gap:9px;align-items:flex-start;padding:9px 11px;margin:0;
+                   border:1px solid var(--line);border-radius:8px;cursor:pointer;
+                   font-size:13px}
+  .czwriters label.on{border-color:var(--accent,#3b6cf6)}
+  .czwriters small{display:block;color:var(--muted);font-size:11.5px;margin-top:2px}
+  .cztest{padding:10px 12px;border:1px solid var(--line);border-radius:8px;margin-top:8px}
+  .cztest .top{display:flex;gap:8px;align-items:baseline}
+  .cztest .nm{font-weight:600;font-size:13.5px}
+  .cztest .say{font-size:12.5px;margin-top:4px}
+  .cztest.pass .say{color:var(--ok,#136c34)} .cztest.bad .say{color:var(--err)}
+  .cztest.wait .say{color:#8a6100}
+  .czneed{padding:10px 12px;border:1px solid #e3c770;border-radius:8px;margin-top:8px;
+          background:rgba(227,199,112,.10)}
   .prio{font-size:10.5px;font-weight:700;padding:1px 6px;border-radius:9px;
         border:1px solid currentColor;margin-right:5px}
   .prio.P0{color:var(--err)} .prio.P1{color:#b25e00} .prio.P2{color:var(--muted)}
@@ -395,6 +414,7 @@
   <a data-view="authoring">Authoring <span class="n" id="navScore"></span></a>
   <a data-view="source">Source <span class="n" id="navLock"></span></a>
   <div class="group">Work</div>
+  <a data-view="create">Create tests</a>
   <a data-view="explore">Explore <span class="n" id="navOps"></span></a>
   <a data-view="tests">Tests <span class="n" id="navTests"></span></a>
   <div class="group">Setup</div>
@@ -706,6 +726,88 @@
   </section>
 
   <!-- ===================================== TESTS -->
+  <!-- =================================================== CREATE TESTS -->
+  <section class="view" data-view="create">
+    <div class="card">
+      <h3>Create tests <span class="grow"></span>
+        <span class="czsteps" id="czSteps">
+          <span data-s="ask" class="on">1 Describe</span>
+          <span data-s="write">2 Write</span>
+          <span data-s="done">3 Review</span></span></h3>
+      <div class="body">
+
+        <!-- 1 · describe -->
+        <div id="czAsk">
+          <p class="hint" id="czBaseline" style="margin-top:0"></p>
+          <label for="czStory" class="czbig">What do you want to test?</label>
+          <textarea id="czStory" rows="3"
+            placeholder="In your own words — one or two sentences is enough."></textarea>
+          <div class="quick" id="czExamples"></div>
+
+          <label class="czbig" style="margin-top:16px">Who should write the tests?</label>
+          <div id="czWriters" class="czwriters"></div>
+
+          <details style="margin-top:10px">
+            <summary style="cursor:pointer;font-size:12px">Options</summary>
+            <label for="czModule">Module — leave empty and one is named for you</label>
+            <input type="text" id="czModule" list="czModules" placeholder="e.g. addresses">
+            <datalist id="czModules"></datalist>
+          </details>
+
+          <div class="btnrow" style="margin-top:14px">
+            <button class="primary" id="czGo">Create tests</button>
+            <span class="hint" id="czGoNote"></span>
+          </div>
+        </div>
+
+        <!-- 2 · write, by an assistant on this machine -->
+        <div id="czWait" hidden>
+          <p class="czbig" id="czWaitHead">Writing your tests…</p>
+          <p class="hint" id="czWaitNote"></p>
+          <div class="btnrow"><button class="sm" id="czCancel">Cancel</button></div>
+        </div>
+
+        <!-- 2 · write, in a tool of your own -->
+        <div id="czPaste" hidden>
+          <p class="czbig">Copy this into your AI tool</p>
+          <p class="hint">ChatGPT, Claude, Gemini — any of them. It is written from your
+            API document, so the tool has everything it needs.</p>
+          <div class="btnrow">
+            <button class="primary" id="czCopy">Copy the prompt</button>
+            <span class="hint" id="czCopyNote"></span>
+          </div>
+          <details style="margin-top:6px"><summary style="cursor:pointer;font-size:12px">
+            Show the prompt</summary>
+            <pre id="czPrompt" style="max-height:260px;overflow:auto"></pre></details>
+
+          <p class="czbig" style="margin-top:18px">Then paste its answer here</p>
+          <textarea id="czReply" rows="6"
+            placeholder="Paste everything it replied with."></textarea>
+          <div class="btnrow" style="margin-top:8px">
+            <button class="primary" id="czCheck">Check and add these tests</button>
+            <button class="sm" id="czBack">Back</button>
+            <span class="hint" id="czCheckNote"></span>
+          </div>
+        </div>
+
+        <!-- 3 · review -->
+        <div id="czDone" hidden>
+          <p class="czbig" id="czDoneHead"></p>
+          <p class="hint" id="czDoneNote"></p>
+          <div id="czNeeds"></div>
+          <div id="czList"></div>
+          <div class="btnrow" style="margin-top:14px">
+            <button class="primary" id="czMore">Create more</button>
+            <button class="sm" id="czOpen">See them in Tests</button>
+            <button class="sm" id="czRetry">Try them again</button>
+            <button class="sm danger" id="czDiscard">Remove these</button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
   <section class="view" data-view="tests">
     <header>
       <h2>Saved tests</h2>
