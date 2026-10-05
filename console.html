@@ -367,6 +367,71 @@
             margin-bottom:11px;background:var(--bg)}
   .stepedit h5{margin:0 0 7px;font-size:12px;font-weight:650;display:flex;gap:8px;
                align-items:center}
+  /* ---- the map: the one dark panel in a light page, on purpose ---- */
+  .mapcard{background:#0a1020;border-color:#1e293b;overflow:hidden}
+  .mapwrap{position:relative;color:#cbd5e1;padding:14px 18px 12px;
+           background:radial-gradient(1200px 400px at 12% 50%,rgba(37,99,235,.16),transparent 60%),#0a1020}
+  .maphead{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  .maptitle{font-size:11px;font-weight:700;letter-spacing:1.6px;text-transform:uppercase;color:#93c5fd}
+  .maptitle span{color:#64748b;margin-left:8px;letter-spacing:.4px;text-transform:none;font-weight:500}
+  .mapsentence{font-size:13.5px;color:#e2e8f0;margin-top:3px;min-height:19px}
+  .mapservers{display:flex;gap:4px;background:#111a2e;border:1px solid #1e293b;border-radius:999px;padding:3px}
+  .mapservers button{all:unset;cursor:pointer;font-size:12px;padding:3px 11px;border-radius:999px;color:#94a3b8}
+  .mapservers button.on{background:#1d4ed8;color:#fff}
+  .mapservers button:focus-visible,.maprun:focus-visible{outline:2px solid #93c5fd;outline-offset:2px}
+  .maprun{all:unset;cursor:pointer;font-size:12.5px;font-weight:600;padding:7px 14px;border-radius:8px;
+          background:#2563eb;color:#fff;white-space:nowrap}
+  .maprun:hover{background:#1d4ed8} .maprun[disabled]{opacity:.75;cursor:default}
+  #mapSvg{display:block;width:100%;height:auto;margin-top:6px}
+  #mapSvg .grid{stroke:rgba(148,163,184,.07);stroke-width:1}
+  #mapSvg .link{fill:none;stroke:rgba(96,165,250,.16);stroke-width:1}
+  #mapSvg .orbit{fill:rgba(15,23,42,.55);stroke:rgba(148,163,184,.22);stroke-width:1;stroke-dasharray:2 4}
+  #mapSvg .cluster{cursor:pointer}
+  #mapSvg .cluster:hover .orbit{stroke:rgba(147,197,253,.7)}
+  #mapSvg .label{fill:#cbd5e1;font:600 11px -apple-system,Segoe UI,Inter,sans-serif;text-anchor:middle}
+  #mapSvg .sub{fill:#64748b;font:10px -apple-system,Segoe UI,Inter,sans-serif;text-anchor:middle}
+  #mapSvg .dot{cursor:pointer;stroke-width:2;transition:fill .25s,stroke .25s;transform-box:fill-box;transform-origin:center}
+  #mapSvg .dot.pass{fill:#34d399;stroke:#065f46}
+  #mapSvg .dot.fail{fill:#f87171;stroke:#7f1d1d;animation:mapPulse 1.5s ease-in-out infinite}
+  #mapSvg .dot.idle{fill:#475569;stroke:#1e293b}
+  #mapSvg .dot.none{fill:#0a1020;stroke:#475569;stroke-dasharray:2 2}
+  #mapSvg .dot:hover{stroke:#fff}
+  #mapSvg .dot.hit{animation:mapHit .45s ease-out}
+  #mapSvg .halo{fill:none;stroke-width:1.6;pointer-events:none}
+  #mapSvg .halo.differs{stroke:#fbbf24}
+  #mapSvg .halo.open{stroke:#f87171;animation:mapOpen 1.2s ease-out infinite;transform-box:fill-box;transform-origin:center}
+  #mapSvg .bolt{fill:#fbbf24;font:700 10px sans-serif;pointer-events:none}
+  #mapSvg .ringbg{fill:none;stroke:#1e293b;stroke-width:10}
+  #mapSvg .ring{fill:none;stroke:#34d399;stroke-width:10;stroke-linecap:round;transition:stroke-dashoffset 1.1s ease,stroke .4s}
+  #mapSvg .pct{fill:#f8fafc;font:700 30px -apple-system,Segoe UI,Inter,sans-serif;text-anchor:middle}
+  #mapSvg .pctlabel{fill:#64748b;font:600 9.5px -apple-system,Segoe UI,Inter,sans-serif;text-anchor:middle;letter-spacing:1.4px}
+  #mapSvg .core{fill:#0f172a;stroke:#1d4ed8;stroke-width:1.5}
+  #mapSvg .packet{fill:#93c5fd;pointer-events:none}
+  #mapSvg .scan{fill:url(#mapScan);opacity:.28;animation:mapScan 11s linear infinite;pointer-events:none}
+  #mapSvg.running .scan{animation-duration:1.8s;opacity:.9}
+  @keyframes mapPulse{0%,100%{transform:scale(1)}50%{transform:scale(1.28)}}
+  @keyframes mapHit{0%{transform:scale(2.1)}100%{transform:scale(1)}}
+  @keyframes mapOpen{0%{transform:scale(1);opacity:.9}100%{transform:scale(2.4);opacity:0}}
+  @keyframes mapScan{0%{transform:translateX(-140px)}100%{transform:translateX(1140px)}}
+  .maplegend{display:flex;gap:14px;flex-wrap:wrap;align-items:center;font-size:11px;color:#94a3b8;margin-top:4px}
+  .maplegend .lg{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;vertical-align:-1px}
+  .maplegend .lg.pass{background:#34d399} .maplegend .lg.fail{background:#f87171}
+  .maplegend .lg.idle{background:#475569} .maplegend .lg.none{border:1.5px dashed #64748b;width:7px;height:7px}
+  .maplegend .lg.open{border:1.5px solid #f87171;width:7px;height:7px}
+  .maplegend .lg.differs{border:1.5px solid #fbbf24;width:7px;height:7px}
+  .maplegend .lg.slow{background:none;width:auto;height:auto;border-radius:0}
+  .maplegend .lg.slow::before{content:"⚡";color:#fbbf24;font-size:10px}
+  .maplegend .hint2{color:#64748b}
+  .maptip{position:absolute;z-index:5;pointer-events:none;background:#020617;border:1px solid #334155;
+          border-radius:8px;padding:8px 11px;font-size:12px;color:#e2e8f0;max-width:360px;
+          box-shadow:0 8px 24px rgba(0,0,0,.5)}
+  .maptip b{font:600 12px ui-monospace,Menlo,monospace;color:#fff;display:block;margin-bottom:3px}
+  .maptip .st{color:#94a3b8} .maptip .flag{color:#fbbf24;display:block;margin-top:2px}
+  .maptip .flag.bad{color:#f87171}
+  @media (prefers-reduced-motion: reduce){
+    #mapSvg .dot.fail,#mapSvg .halo.open,#mapSvg .scan,#mapSvg .dot.hit{animation:none}
+    #mapSvg .ring{transition:none}
+  }
   .loadline{display:flex;justify-content:flex-end;margin:-2px 0 6px}
   .loadpanel{border:1px solid var(--line);border-radius:8px;padding:11px 13px;margin-bottom:10px}
   .loadpanel table{width:100%;border-collapse:collapse;margin-top:9px;font-size:12.5px}
@@ -541,6 +606,28 @@
     </header>
     <div class="card" id="homeNextCard">
       <div class="body homenext" id="homeNext">Checking…</div>
+    </div>
+    <div class="card mapcard" id="mapCard" hidden>
+      <div class="mapwrap" id="mapWrap">
+        <div class="maphead">
+          <div>
+            <div class="maptitle">Your API <span id="mapName"></span></div>
+            <div class="mapsentence" id="mapSentence"></div>
+          </div>
+          <span class="grow"></span>
+          <div class="mapservers" id="mapServers"></div>
+          <button class="maprun" id="mapRun"></button>
+        </div>
+        <svg id="mapSvg" role="img" aria-label="Every endpoint of the API, coloured by what is known about it"></svg>
+        <div class="maplegend">
+          <span><i class="lg pass"></i>proven</span><span><i class="lg fail"></i>failing</span>
+          <span><i class="lg idle"></i>not run here yet</span><span><i class="lg none"></i>no test</span>
+          <span><i class="lg open"></i>open to anyone</span><span><i class="lg slow"></i>slow</span>
+          <span><i class="lg differs"></i>differs from the document</span>
+          <span class="grow"></span><span class="hint2">click an endpoint to see its tests</span>
+        </div>
+        <div class="maptip" id="mapTip" hidden></div>
+      </div>
     </div>
     <div class="card" id="homeNoticedCard" hidden>
       <h3>mockd noticed <span class="grow"></span>

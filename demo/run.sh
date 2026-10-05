@@ -24,7 +24,7 @@ if ! NODE_PATH="$NODE_PATH" node -e "require('playwright')" 2>/dev/null; then
   exit 1
 fi
 
-SANITY="e2e toast home impact"
+SANITY="e2e toast home impact map"
 TESTS="workbench wbasserts oppicker selectors pipeline library openload scoped envalign visible report assert runnow chain lifecycle record baseline create list bug mcp needs tracker load"
 SPEC="specpick projectspec compare discover params newenv envlogin servers document watch"
 MISC="picker progress splice envvars reveal"

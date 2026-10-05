@@ -2711,6 +2711,54 @@ def t_coerce(value):
 
 
 # ---------------------------------------------------------------------------
+# The whole API on one screen
+# ---------------------------------------------------------------------------
+@app.get("/api/map")
+def api_map():
+    """Every endpoint, grouped by resource, with what is known about it on one
+    server: proven, failing, never run there, never tested, open, slow, or
+    answering differently from the document."""
+    import apimap
+    import environments as envmod
+    import tests as t
+    spec = load_project_spec()
+    if spec is None:
+        return jsonify({"ok": False, "error": "There is no API document yet."}), 200
+    servers = []
+    for name, env in sorted(envmod.load().items(), key=lambda kv: (kv[0] != "mock", kv[0])):
+        if name.startswith("mock-"):
+            continue
+        missing = []
+        envmod.resolve({"base_url": env.get("base_url"), "auth": env.get("auth"),
+                        "headers": env.get("headers")}, missing)
+        if not missing:
+            servers.append(name)
+    env = request.args.get("env") or "mock"
+    if env not in servers:
+        env = "mock"
+
+    slow, differs, used = set(), set(), set()
+    try:
+        import perf
+        found = perf.findings(spec).get(env) or {}
+        slow = {x["operation"] for x in (found.get("slow") or []) + (found.get("slower") or [])}
+    except Exception:
+        pass
+    try:
+        seen = _recorded_findings()
+        if seen and (seen.get("meta") or {}).get("server") == env:
+            differs = ({x["operation"] for x in seen.get("fields") or []}
+                       | {x["operation"] for x in seen.get("undocumented_statuses") or []})
+            used = {x["operation"] for x in seen.get("used") or []}
+    except Exception:
+        pass
+    built = apimap.build(spec, t.load_suites(include_drafts=True), env, LOG_DIR,
+                         slow=slow, differs=differs, used=used)
+    return jsonify({"ok": True, "servers": servers, "title": spec.title,
+                    "mock_running": bool(mock.running), **built})
+
+
+# ---------------------------------------------------------------------------
 # How fast it answers
 # ---------------------------------------------------------------------------
 PERF = {"thread": None, "stop": None, "progress": None, "result": None, "server": None}

@@ -1959,7 +1959,66 @@ def group_perf():
                and "1 endpoint is over the 300 ms budget" in said, said)
 
 
+def group_apimap():
+    """Every endpoint with what is known about it, for one server."""
+    import json as _json
+    import tempfile
+    from pathlib import Path
+    import apimap
+    from mockd import Spec
+
+    r = {"responses": {"200": {"description": "ok"}}}
+    doc = {"openapi": "3.1.0", "info": {"title": "W", "version": "1"}, "paths": {
+        "/api/v1/widgets": {"get": r, "post": r}, "/api/v1/widgets/{widget_id}": {"get": r, "delete": r},
+        "/api/v1/reports": {"get": r}, "/health": {"get": r}}}
+    spec = Spec(text=_json.dumps(doc), origin="w.json")
+    suites = [{"name": "m", "_stage": "draft", "cases": [
+        {"id": "lists", "request": {"method": "GET", "path": "/api/v1/widgets"}},
+        {"id": "nobody", "tags": ["access"], "request": {"method": "GET", "path": "/api/v1/reports"}}],
+        "scenarios": [{"id": "flow", "steps": [
+            {"request": {"method": "POST", "path": "/api/v1/widgets"}},
+            {"request": {"method": "GET", "path": "/api/v1/widgets/{{id}}"}},
+            {"request": {"method": "DELETE", "path": "/api/v1/widgets/{{id}}"}}]}]}]
+
+    def step(method, path, outcome, status=200):
+        return {"outcome": outcome, "status": status, "request": {"method": method, "url": f"http://x{path}"}}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "run-1.json").write_text(_json.dumps({"env": "dev", "suites": [{"name": "m", "results": [
+            {"id": "lists", "steps": [step("GET", "/api/v1/widgets", "pass")]},
+            {"id": "nobody", "tags": ["access"], "steps": [step("GET", "/api/v1/reports", "fail", 200)]},
+            {"id": "flow", "steps": [step("POST", "/api/v1/widgets", "pass", 201),
+                                     step("GET", "/api/v1/widgets/abc", "fail", 500),
+                                     {"outcome": "blocked", "status": None,
+                                      "request": {"method": "DELETE", "url": "http://x/api/v1/widgets/abc"}}]}]}]}))
+        built = apimap.build(spec, suites, "dev", tmp, slow={"GET /api/v1/widgets"})
+        by = {e["key"]: e for res in built["resources"] for e in res["endpoints"]}
+        check("map: every documented endpoint is on it", len(by), 6)
+        check("map: a call that passed is proven", by["GET /api/v1/widgets"]["state"], "pass")
+        check("map: in a flow, the call that failed is the one marked — not those before it",
+              (by["POST /api/v1/widgets"]["state"], by["GET /api/v1/widgets/{widget_id}"]["state"]),
+              ("pass", "fail"))
+        check("map: a call the flow never reached is not counted as run",
+              by["DELETE /api/v1/widgets/{widget_id}"]["state"], "idle")
+        check("map: an endpoint no test calls is shown as that", by["GET /health"]["state"], "none")
+        check_true("map: one that answered a caller who had not signed in is marked open",
+                   by["GET /api/v1/reports"]["open"] and built["counts"]["open"] == 1)
+        check_true("map: slowness from elsewhere is put on the endpoint it is about",
+                   by["GET /api/v1/widgets"]["slow"] and not by["GET /health"]["slow"])
+        check("map: endpoints are grouped by what they are about",
+              sorted((res["name"], len(res["endpoints"])) for res in built["resources"]),
+              [("health", 1), ("reports", 1), ("widgets", 4)])
+        check("map: the number is the share proven", built["health"], 33)
+        check_true("map: and the sentence says the rest",
+                   built["sentence"] == "2 of 6 endpoints proven on dev · 2 failing · 1 open to anyone · 1 with no test.",
+                   built["sentence"])
+        other = apimap.build(spec, suites, "staging", tmp)
+        check_true("map: a server nothing has run on says so",
+                   other["sentence"] == "Nothing has been run on staging yet." and other["health"] == 0)
+
+
 GROUPS = {
+    "apimap": group_apimap,
     "perf": group_perf,
     "access": group_access,
     "trackers": group_trackers,

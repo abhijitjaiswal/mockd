@@ -4104,6 +4104,242 @@ $("watchHar").addEventListener("change", async (ev) => {
   watchLoad();
 });
 
+/* ------------------------------------------------------------------ map
+   The whole API on one screen. Every endpoint is a dot, grouped by resource
+   and coloured by what is known about it on one server: proven, failing, not
+   run there yet, or not tested at all — with a ring where it is open to anyone
+   or differs from the document, and a bolt where it is slow. When the tests
+   run, each call goes out from the centre and its endpoint settles to the
+   colour it earned. It is drawn to be watched, and every part of it is a
+   fact: hover for what, click for the tests. */
+const MAP = { env: "mock", data: null, dots: {}, busy: false, core: { x: 112, y: 150 } };
+const MAP_CALM = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const SVGNS = "http://www.w3.org/2000/svg";
+const svgEl = (tag, attrs, parent) => {
+  const el = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, v);
+  if (parent) parent.appendChild(el);
+  return el;
+};
+const MAP_WORDS = (env) => {
+  const where = env === "mock" ? "the mock" : env;
+  return { pass: `proven on ${where}`, fail: `failing on ${where}`,
+           idle: `has tests, but they have not run on ${where}`, none: "no test calls this yet" };
+};
+
+async function mapLoad(animate) {
+  if (!$("mapCard") || MAP.busy) return;
+  let d;
+  try { ({ data: d } = await api("/api/map?env=" + encodeURIComponent(MAP.env))); } catch { return; }
+  if (!d || !d.ok || !d.total) { $("mapCard").hidden = true; return; }
+  MAP.env = d.env;
+  mapRender(d, animate !== false);
+}
+
+function mapLayout(resources) {
+  // clusters packed into rows to the right of the centre; each as wide as its ring
+  // ...and never narrower than its label, so two names cannot run together
+  const left = 250, right = 985, gapX = 14;
+  const rows = [[]];
+  let x = left;
+  for (const r of resources) {
+    const n = r.endpoints.length;
+    const radius = Math.max(19, Math.min(64, n * 2.75));
+    const wide = Math.max(radius * 2, 112);
+    if (x + wide > right && rows[rows.length - 1].length) { rows.push([]); x = left; }
+    rows[rows.length - 1].push({ resource: r, radius, wide, cx: x + wide / 2 });
+    x += wide + gapX;
+  }
+  let y = 26;
+  const placed = [];
+  for (const row of rows) {
+    const tall = Math.max(...row.map((c) => c.radius));
+    const used = row[row.length - 1].cx + row[row.length - 1].wide / 2 - left;
+    const shift = (right - left - used) / 2;                 // centre the row
+    for (const c of row) placed.push({ ...c, cx: c.cx + shift, cy: y + tall });
+    y += tall * 2 + 46;
+  }
+  return { placed, height: Math.max(300, y + 4) };
+}
+
+function mapRender(d, animate) {
+  MAP.data = d;
+  $("mapCard").hidden = false;
+  $("mapName").textContent = d.title ? `· ${d.title}` : "";
+  $("mapSentence").textContent = d.sentence;
+  $("mapServers").innerHTML = (d.servers || []).length > 1 ? d.servers.map((n) =>
+    `<button class="${n === d.env ? "on" : ""}" data-mapenv="${esc(n)}">${esc(n)}</button>`).join("") : "";
+  $("mapServers").querySelectorAll("[data-mapenv]").forEach((b) =>
+    b.addEventListener("click", () => { if (MAP.busy) return; MAP.env = b.dataset.mapenv; mapLoad(true); }));
+  if (!MAP.busy) {
+    $("mapRun").disabled = false;
+    $("mapRun").textContent = `▶ Run every test on ${d.env}`;
+  }
+
+  const svg = $("mapSvg");
+  const { placed, height } = mapLayout(d.resources || []);
+  MAP.core = { x: 112, y: height / 2 };
+  svg.setAttribute("viewBox", `0 0 1000 ${height}`);
+  svg.innerHTML = `<defs>
+      <linearGradient id="mapScan" x1="0" x2="1"><stop offset="0" stop-color="#60a5fa" stop-opacity="0"/>
+        <stop offset="1" stop-color="#60a5fa" stop-opacity=".22"/></linearGradient>
+      <pattern id="mapGrid" width="40" height="40" patternUnits="userSpaceOnUse">
+        <path d="M40 0H0V40" fill="none" class="grid"/></pattern></defs>
+    <rect width="1000" height="${height}" fill="url(#mapGrid)"/>
+    <rect class="scan" x="0" y="0" width="140" height="${height}"/>`;
+  const links = svgEl("g", {}, svg), clusters = svgEl("g", {}, svg), packets = svgEl("g", { id: "mapPackets" }, svg);
+  void packets;
+
+  // the centre: one number for the whole API on this server
+  const core = MAP.core, R = 56, around = 2 * Math.PI * R;
+  svgEl("circle", { class: "core", cx: core.x, cy: core.y, r: R + 18 }, svg);
+  svgEl("circle", { class: "ringbg", cx: core.x, cy: core.y, r: R }, svg);
+  const ring = svgEl("circle", { class: "ring", id: "mapRing", cx: core.x, cy: core.y, r: R,
+    "stroke-dasharray": around, "stroke-dashoffset": around,
+    transform: `rotate(-90 ${core.x} ${core.y})` }, svg);
+  const pct = svgEl("text", { class: "pct", id: "mapPct", x: core.x, y: core.y + 8 }, svg);
+  svgEl("text", { class: "pctlabel", x: core.x, y: core.y + 26 }, svg).textContent = "PROVEN";
+  const settle = () => {
+    ring.setAttribute("stroke-dashoffset", around * (1 - d.health / 100));
+    ring.style.stroke = d.counts.fail ? (d.health >= 60 ? "#fbbf24" : "#f87171") : "#34d399";
+  };
+  if (animate && !MAP_CALM) {
+    const from = Number(pct.dataset.at || 0), start = performance.now();
+    const tick = (now) => {
+      const t = Math.min(1, (now - start) / 900);
+      pct.textContent = Math.round(from + (d.health - from) * t) + "%";
+      if (t < 1) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick); requestAnimationFrame(() => requestAnimationFrame(settle));
+  } else { pct.textContent = d.health + "%"; settle(); }
+
+  MAP.dots = {};
+  const words = MAP_WORDS(d.env);
+  placed.forEach((c, ci) => {
+    const midX = (core.x + R + 18 + c.cx - c.radius) / 2;
+    svgEl("path", { class: "link", d: `M${core.x + R + 18} ${core.y} C${midX} ${core.y} ${midX} ${c.cy} ${c.cx - c.radius} ${c.cy}` }, links);
+    const g = svgEl("g", { class: "cluster", "data-mapres": c.resource.name }, clusters);
+    svgEl("circle", { class: "orbit", cx: c.cx, cy: c.cy, r: c.radius }, g);
+    const n = c.resource.endpoints.length, size = n > 12 ? 5 : 6.5;
+    c.resource.endpoints.forEach((e, i) => {
+      const angle = -Math.PI / 2 + (2 * Math.PI * i) / n;
+      const x = c.cx + (n === 1 ? 0 : c.radius * Math.cos(angle)), y = c.cy + (n === 1 ? 0 : c.radius * Math.sin(angle));
+      if (e.differs) svgEl("circle", { class: "halo differs", cx: x, cy: y, r: size + 3.5 }, g);
+      if (e.open) svgEl("circle", { class: "halo open", cx: x, cy: y, r: size + 2 }, g);
+      const dot = svgEl("circle", { class: `dot ${e.state}`, cx: x, cy: y, r: size, "data-mapkey": e.key, tabindex: "0" }, g);
+      if (e.slow) svgEl("text", { class: "bolt", x: x + size - 1, y: y - size + 2 }, g).textContent = "⚡";
+      if (animate && !MAP_CALM) { dot.style.opacity = "0"; setTimeout(() => { dot.style.opacity = ""; dot.classList.add("hit"); }, 120 + ci * 60 + i * 14); }
+      MAP.dots[e.key] = { el: dot, x, y, e };
+      const tip = () => {
+        const flags = (e.open ? '<span class="flag bad">answered a caller who had not signed in</span>' : "")
+          + (e.differs ? '<span class="flag">real traffic differed from the document here</span>' : "")
+          + (e.slow ? '<span class="flag">slow, or slower than it used to be</span>' : "");
+        $("mapTip").innerHTML = `<b>${esc(e.key)}</b>${e.summary ? esc(e.summary) + " · " : ""}<span class="st">${esc(words[e.state])}`
+          + (e.tests.length ? ` · ${e.tests.length} test${e.tests.length === 1 ? "" : "s"}` : "") + `</span>${flags}`;
+        const box = $("mapWrap").getBoundingClientRect(), at = dot.getBoundingClientRect();
+        $("mapTip").hidden = false;
+        const w = $("mapTip").offsetWidth;
+        $("mapTip").style.left = Math.max(8, Math.min(box.width - w - 8, at.left - box.left + at.width / 2 - w / 2)) + "px";
+        $("mapTip").style.top = (at.bottom - box.top + 9) + "px";
+      };
+      dot.addEventListener("mouseenter", tip); dot.addEventListener("focus", tip);
+      dot.addEventListener("mouseleave", () => { $("mapTip").hidden = true; });
+      dot.addEventListener("blur", () => { $("mapTip").hidden = true; });
+      dot.addEventListener("click", (ev) => { ev.stopPropagation(); mapOpen([e], e.key); });
+    });
+    svgEl("text", { class: "label", x: c.cx, y: c.cy + c.radius + 19 }, g).textContent =
+      c.resource.name.length > 18 ? c.resource.name.slice(0, 17) + "…" : c.resource.name;
+    const bad = c.resource.endpoints.filter((e) => e.state === "fail").length;
+    svgEl("text", { class: "sub", x: c.cx, y: c.cy + c.radius + 32 }, g).textContent =
+      `${n} endpoint${n === 1 ? "" : "s"}${bad ? ` · ${bad} failing` : ""}`;
+    g.addEventListener("click", () => mapOpen(c.resource.endpoints, c.resource.name));
+  });
+}
+
+/* From the map to the tests behind it — or, where there are none, to making one. */
+function mapOpen(endpoints, what) {
+  if (MAP.busy) return;
+  const keys = new Set(endpoints.flatMap((e) => e.tests));
+  if (!keys.size) {
+    const e = endpoints[0];
+    $("czStory").value = `Check ${e.summary ? e.summary.toLowerCase() : e.key} (${e.key}).`;
+    showView("create");
+    banner("ok", `No test calls ${endpoints.length === 1 ? e.key : what} yet — describe what it should do.`);
+    return;
+  }
+  LIB.only = { keys, label: endpoints.length === 1 ? `that call ${what}` : `for ${what}` };
+  LIB.q = ""; LIB.module = ""; LIB.type = ""; LIB.priority = ""; LIB.result = ""; LIB.page = 0;
+  $("libSearch").value = ""; LIB.wantServer = MAP.env;
+  showView("tests");
+}
+
+function mapPacket(to, done, ms) {
+  const layer = document.getElementById("mapPackets");
+  if (!layer || MAP_CALM) { if (done) done(); return; }
+  const from = MAP.core, dot = svgEl("circle", { class: "packet", r: 2.6, cx: from.x, cy: from.y }, layer);
+  const start = performance.now(), took = ms || 420, bend = (to.y - from.y) * 0.35;
+  const step = (now) => {
+    const t = Math.min(1, (now - start) / took), k = 1 - t;
+    dot.setAttribute("cx", k * k * from.x + 2 * k * t * ((from.x + to.x) / 2) + t * t * to.x);
+    dot.setAttribute("cy", k * k * from.y + 2 * k * t * (from.y + bend) + t * t * to.y);
+    if (t < 1) requestAnimationFrame(step); else { dot.remove(); if (done) done(); }
+  };
+  requestAnimationFrame(step);
+}
+
+/* Run everything on the server shown, and watch it happen. While the run is
+   going the calls are shown going out; when it ends each endpoint settles to
+   what the run actually found — nothing on screen is decided by the animation. */
+async function mapRun() {
+  if (MAP.busy || !MAP.data) return;
+  const env = MAP.env;
+  const { data } = await api("/api/tests/run", { method: "POST",
+    body: JSON.stringify({ env, drafts: true, kinds: [], verbose: false }) });
+  if (data.error) { banner("err", data.error); return; }
+  MAP.busy = true;
+  LAST_RUN = data.job;
+  $("mapRun").disabled = true;
+  $("mapSvg").classList.add("running");
+  const all = Object.values(MAP.dots);
+  const probing = setInterval(() => {
+    const target = all[Math.floor(Math.random() * all.length)];
+    if (target) mapPacket(target, null, 380);
+  }, 110);
+  const began = Date.now();
+  let job = {};
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 700));
+    try { job = (await api("/api/job/" + data.job)).data || {}; } catch { job = { done: true }; }
+    $("mapRun").textContent = `Running on ${env}… ${Math.round((Date.now() - began) / 1000)}s`;
+    if (job.done || job.error) break;
+  }
+  clearInterval(probing);
+  $("mapSvg").classList.remove("running");
+  let fresh = null;
+  try { fresh = (await api("/api/map?env=" + encodeURIComponent(env))).data; } catch { /* keep what is shown */ }
+  if (fresh && fresh.ok) {
+    const order = fresh.resources.flatMap((r) => r.endpoints).filter((e) => MAP.dots[e.key]);
+    const gap = Math.min(45, 3200 / Math.max(order.length, 1));
+    await new Promise((finish) => {
+      if (!order.length || MAP_CALM) { finish(); return; }
+      let left = order.length;
+      order.forEach((e, i) => setTimeout(() => mapPacket(MAP.dots[e.key], () => {
+        const el = MAP.dots[e.key].el;
+        el.setAttribute("class", `dot ${e.state} hit`);
+        if (--left === 0) finish();
+      }, 360), i * gap));
+    });
+    MAP.busy = false;
+    mapRender(fresh, true);
+    const c = fresh.counts;
+    banner(c.fail ? "err" : "ok", `${env}: ${fresh.sentence}`);
+  } else MAP.busy = false;
+  $("mapRun").disabled = false;
+  $("mapRun").textContent = `▶ Run every test on ${env}`;
+  loadTests(); homeNoticed(); loadBaseline && loadBaseline();
+}
+$("mapRun").addEventListener("click", mapRun);
+
 /* ------------------------------------------------------------- noticed
    Things mockd found without being asked: a contract that moved under the
    tests, a test that cannot pass, a mock that no longer matches. Shown only
@@ -4242,6 +4478,7 @@ async function homeLoad() {
        <button data-homego="tests">Open Tests</button>`;
 
   homeNoticed();
+  mapLoad(!MAP.data);                 // animate the first time it appears, not on every refresh
 
   $("homeList").innerHTML = rows.map((r) => `
     <div class="homerow" data-home="${r.key}">
