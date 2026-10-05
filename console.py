@@ -418,9 +418,17 @@ def project_set():
         ok, detail = mock.start(options)
         moved = (f" The mock was restarted on it."
                  if ok else f" The mock could NOT be restarted: {detail}")
+        if ok and not module:
+            # a new document means a new baseline; without this the tests on
+            # screen went on describing the document that was just replaced
+            try:
+                begin_selfcheck(wanted)
+            except Exception:
+                pass
 
     where = f"module {module}" if module else "the whole project"
     return jsonify({"ok": True, "spec": project.active_spec(), "modules": project.report(),
+                    "mock_running": mock.running, "mock_restarted": bool(moved),
                     "mock_spec": mock.options.get("spec") if mock.running else None,
                     "message": f"{where} now uses {spec} — commit mockd.json "
                                f"so the team shares it.{moved}"})

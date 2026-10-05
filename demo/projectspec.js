@@ -47,6 +47,8 @@ process.on("exit", restore);
   await p.goto("http://localhost:4100", { waitUntil: "networkidle" });
   await p.waitForTimeout(1800);
   await p.locator('nav.side a[data-view="source"]').click();
+  // these drive the tools kept under Advanced on this screen
+  await p.evaluate(() => window.showSrcAdvanced(true));
   await p.waitForTimeout(900);
 
   const tagNow = (await p.locator("#projSpecTag").textContent()).trim();
@@ -109,6 +111,8 @@ process.on("exit", restore);
   await p.reload({ waitUntil: "networkidle" });
   await p.waitForTimeout(1500);
   await p.locator('nav.side a[data-view="source"]').click();
+  // these drive the tools kept under Advanced on this screen
+  await p.evaluate(() => window.showSrcAdvanced(true));
   await p.waitForTimeout(900);
   check("a pinned module is visible as an exception",
         /1 module\(s\) deliberately pinned/.test(

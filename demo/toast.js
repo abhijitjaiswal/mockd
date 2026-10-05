@@ -67,6 +67,8 @@ const check = (n, ok, d) => { ok ? pass++ : fail++;
 
   // --- the actual reported symptom, on the view it was reported from ---
   await p.locator('nav.side a[data-view="source"]').click();
+  // these drive the tools kept under Advanced on this screen
+  await p.evaluate(() => window.showSrcAdvanced(true));
   await p.waitForTimeout(600);
 
   await p.locator("#specUrl").fill(HOST.replace(/^https?:\/\//, "") + "/openapi.json");

@@ -1867,8 +1867,10 @@ async function loadSpecStatus() {
   }
   const st = data.state || {};
   const [cls, label, note] = LOCK_STATE[st.state] || LOCK_STATE.unlocked;
-  $("navLock").innerHTML = st.state === "match" ? "pinned"
-    : `<span style="color:var(--err)">${esc(st.state || "?")}</span>`;
+  // only worth a word in the sidebar when it differs from what the team locked
+  $("navLock").innerHTML = st.state === "drift"
+    ? '<span style="color:#b25e00">changed</span>' : "";
+  docRender(data);
 
   const sum = data.summary || {};
   const lock = data.lock;
@@ -2031,6 +2033,9 @@ async function setProjectSpec(spec, module, clear) {
   });
   if (!data.ok) { banner("err", data.error); return; }
   banner("ok", data.message || "updated");
+  // The mock's own setting follows the project. Left behind, this screen went
+  // on describing the old document and Restart put the mock back onto it.
+  if (!module && data.spec) $("spec").value = data.spec;
   // everything downstream was computed from the old document
   await loadProjectSpec();
   await loadSpecStatus();
@@ -3487,6 +3492,147 @@ $("bindRefresh").addEventListener("click", loadBindings);
 
 /* Fix a suite in place rather than regenerating it: the tests somebody already
    reviewed keep their shape, and only the placeholder ids change. */
+/* ------------------------------------------------------------- document
+   Which document is in use, and one way to bring in another: a link or a file.
+   Loading only ever shows what was found; nothing is replaced until the person
+   says so. Comparing versions, the lock and per-tool choices are Advanced. */
+const DOC = { found: null };
+
+function showSrcAdvanced(on) {
+  const open = on === undefined ? $("srcAdvWrap").hidden : !!on;
+  $("srcAdvWrap").hidden = !open;
+  $("srcAdvToggle").textContent = open ? "Advanced ▾" : "Advanced ▸";
+  $("srcAdvToggle").setAttribute("aria-expanded", String(open));
+}
+window.showSrcAdvanced = showSrcAdvanced;
+$("srcAdvToggle").addEventListener("click", () => showSrcAdvanced());
+
+const docCount = (n) => `${n} endpoint${n === 1 ? "" : "s"}`;
+
+function docRender(data) {
+  if (!$("docNow")) return;
+  const sum = data.summary || {}, st = data.state || {}, lock = data.lock || {};
+  DOC.now = { source: data.source, operations: sum.operations };
+  $("docNow").innerHTML = `<div class="docnow">
+    <b>${esc(sum.title || data.source)}</b>${sum.version ? ` · version ${esc(sum.version)}` : ""}
+      · ${docCount(sum.operations ?? 0)}
+    <div class="from">from ${esc(data.source)}</div>
+    ${st.state === "drift" ? `<div class="warn">
+      <span>This is not the version the team last locked${
+        lock.operations != null ? ` — that one had ${docCount(lock.operations)}` : ""}.</span>
+      <button class="sm" id="docDiff">What changed?</button></div>` : ""}
+  </div>`;
+  const diff = $("docDiff");
+  if (diff) diff.addEventListener("click", async () => {
+    showSrcAdvanced(true);
+    await showDiff(data.source);
+    $("candidateCard").scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+}
+
+function docName(raw) {
+  let name = String(raw || "").split(/[\\/]/).pop().replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "") || "document";
+  if (!/\.(json|ya?ml)$/i.test(name)) name += ".json";
+  // never write over the document in use before the person has agreed to it
+  if (DOC.now && DOC.now.source === `specs/${name}`) name = "new-" + name;
+  return name;
+}
+
+$("docChoose").addEventListener("click", () => $("docFile").click());
+$("docFile").addEventListener("change", (ev) => {
+  const f = ev.target.files[0];
+  if (!f) return;
+  $("docUrl").value = "";
+  $("docChosen").textContent = `${f.name} chosen — press Load.`;
+});
+$("docUrl").addEventListener("input", () => {
+  if ($("docUrl").value.trim() && $("docFile").files.length) {
+    $("docFile").value = "";
+    $("docChosen").textContent = "Nothing changes until you have seen what was found.";
+  }
+});
+
+$("docLoad").addEventListener("click", async () => {
+  const url = $("docUrl").value.trim();
+  const file = $("docFile").files[0];
+  if (!url && !file) { banner("err", "Paste a link or choose a file first."); return; }
+  if (url && !/^https?:\/\//i.test(url)) {
+    banner("err", "The link should start with http:// or https://");
+    return;
+  }
+  $("docLoad").disabled = true; $("docLoad").textContent = "Loading…";
+  try {
+    let data;
+    if (file) {
+      ({ data } = await api("/api/spec/upload", { method: "POST",
+        body: JSON.stringify({ content: await file.text(), name: docName(file.name) }) }));
+    } else {
+      let host = "document";
+      try { host = new URL(url).hostname; } catch { /* keep the default */ }
+      ({ data } = await api("/api/spec/fetch", { method: "POST",
+        body: JSON.stringify({ url, headers: "", save_as: docName(host + ".json") }) }));
+    }
+    if (!data.ok) {
+      banner("err", /not a usable/i.test(data.error || "")
+        ? "That is not an API document this can read. It needs an OpenAPI (Swagger) file."
+        : `Could not load it. ${String(data.error || "").split("\n")[0].slice(0, 220)}`);
+      return;
+    }
+    DOC.found = data;
+    const sum = data.summary || {};
+    const was = DOC.now && DOC.now.operations;
+    $("docFound").hidden = false;
+    $("docFound").innerHTML = `
+      <div>Found <b>${esc(sum.title || data.file)}</b>${sum.version ? ` · version ${esc(sum.version)}` : ""}
+        · ${docCount(sum.operations ?? 0)}${
+        was != null ? ` <span class="hint">— the one in use has ${was}</span>` : ""}</div>
+      <div class="btnrow" style="margin-top:10px">
+        <button class="primary sm" id="docUse">Use this document</button>
+        <button class="sm" id="docCancel">Cancel</button>
+        <span class="hint">The mock restarts on it and the baseline tests are remade.
+          Tests you wrote are kept.</span>
+      </div>`;
+    $("docCancel").onclick = () => {
+      DOC.found = null; $("docFound").hidden = true; $("docFile").value = "";
+      $("docChosen").textContent = "Nothing changes until you have seen what was found.";
+    };
+    $("docUse").onclick = docUse;
+  } catch (err) {
+    banner("err", `Could not load it: ${err.message}`);
+  } finally {
+    $("docLoad").disabled = false; $("docLoad").textContent = "Load";
+  }
+});
+
+async function docUse() {
+  if (!DOC.found) return;
+  $("docUse").disabled = true; $("docUse").textContent = "Switching…";
+  const { data } = await api("/api/project", { method: "POST",
+    body: JSON.stringify({ spec: DOC.found.file, module: null, clear: false }) });
+  if (!data.ok) {
+    banner("err", data.error || "could not switch");
+    $("docUse").disabled = false; $("docUse").textContent = "Use this document";
+    return;
+  }
+  DOC.found = null;
+  if (data.spec) $("spec").value = data.spec;      // see setProjectSpec
+  // said at once: the reloads below take a moment and silence reads as failure
+  banner("ok", data.mock_restarted
+    ? "Now using this document. The mock restarted on it and the baseline tests are being remade."
+    : data.mock_running ? "Now using this document."
+    : "Now using this document. Start the mock from Home to try it.");
+  $("docFound").hidden = true;
+  $("docUrl").value = ""; $("docFile").value = "";
+  $("docChosen").textContent = "Nothing changes until you have seen what was found.";
+  await loadProjectSpec();
+  await refreshState();
+  await loadSpecStatus();
+  await loadCoverage();
+  ROUTES = []; GUIDE = "";
+  if (data.mock_restarted && typeof watchSelfcheck === "function") watchSelfcheck();
+}
+
 /* -------------------------------------------------------------- servers
    A server is a name, an address, a way of signing in, and whether it is safe
    to write to. That is all anybody adding "dev" needs to say. Which file it is

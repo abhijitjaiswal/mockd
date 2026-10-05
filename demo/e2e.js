@@ -56,7 +56,9 @@ function check(name, ok, detail) {
 
   // ---------------------------------------------------------------- source
   console.log("\nSOURCE");
-  await p.locator('nav.side a[data-view="source"]').click(); await p.waitForTimeout(1200);
+  await p.locator('nav.side a[data-view="source"]').click();
+  // these drive the tools kept under Advanced on this screen
+  await p.evaluate(() => window.showSrcAdvanced(true)); await p.waitForTimeout(1200);
   const statusText = await p.locator("#specStatus").textContent();
   // which status is correct depends on whether the project spec happens to be
   // the pinned one, so assert that provenance is REPORTED, not that it matches

@@ -82,6 +82,8 @@ const BLANK = `<!DOCTYPE html><html><body><h1>API documentation</h1></body></htm
   await p.goto("http://localhost:4100", { waitUntil: "networkidle" });
   await p.waitForTimeout(1800);
   await p.locator('nav.side a[data-view="source"]').click();
+  // these drive the tools kept under Advanced on this screen
+  await p.evaluate(() => window.showSrcAdvanced(true));
   await p.waitForTimeout(600);
 
   async function fetchSpec(path, saveAs, host) {
