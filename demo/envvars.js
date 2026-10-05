@@ -12,7 +12,9 @@ const ck=(n,ok,d)=>{ok?pass++:fail++;console.log(`  ${ok?"ok  ":"FAIL"}  ${n}${o
   const c=await b.newContext({viewport:{width:1500,height:1150},deviceScaleFactor:2,colorScheme:"light"});
   const p=await c.newPage(); p.on("pageerror",e=>errs.push(e.message));
   await p.goto("http://localhost:4100",{waitUntil:"networkidle"}); await p.waitForTimeout(2500);
-  await p.locator('nav.side a[data-view="environments"]').click(); await p.waitForTimeout(1200);
+  await p.locator('nav.side a[data-view="environments"]').click();
+  // these drive the technical tools kept under Advanced on this screen
+  await p.evaluate(() => window.showEnvAdvanced(true)); await p.waitForTimeout(1200);
 
   console.log("\nSET VARS FROM THE UI");
   ck("every environment has a Configure button",

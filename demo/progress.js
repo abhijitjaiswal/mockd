@@ -9,7 +9,9 @@ const ck=(n,ok,d)=>{ok?pass++:fail++;console.log(`  ${ok?"ok  ":"FAIL"}  ${n}${o
   await p.goto("http://localhost:4100",{waitUntil:"networkidle"}); await p.waitForTimeout(2500);
 
   console.log("\nLIVE PROGRESS — verify against a deliberately slow target");
-  await p.locator('nav.side a[data-view="environments"]').click(); await p.waitForTimeout(800);
+  await p.locator('nav.side a[data-view="environments"]').click();
+  // these drive the technical tools kept under Advanced on this screen
+  await p.evaluate(() => window.showEnvAdvanced(true)); await p.waitForTimeout(800);
   await p.locator("#liveUrl").fill("http://127.0.0.1:4010");
   await p.locator("#liveHeaders").fill("X-Mock-Delay: 300");
   await p.locator("#btnVerifyLive").click();

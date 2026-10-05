@@ -50,6 +50,11 @@
     nav.side{position:static;width:auto;height:auto;border-right:0;
              border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:4px;padding:8px}
     nav.side .group{display:none}
+    /* More is a control, not a heading: hiding it left its screens unreachable */
+    nav.side .group.navmore{display:inline-block;width:auto;padding:6px 10px}
+    #navMoreItems{display:contents}
+    #navMoreItems[hidden]{display:none}
+    #navMoreItems a{padding-left:10px}
     main{margin:0;padding:14px}
     .topbar{position:sticky}
   }
@@ -80,7 +85,7 @@
   .btnrow{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px}
   label{display:block;font-size:12px;color:var(--muted);margin:10px 0 3px;font-weight:600}
   .body > label:first-child{margin-top:0}
-  input[type=text],input[type=number],select,textarea{
+  input[type=text],input[type=password],input[type=search],input[type=number],select,textarea{
      width:100%;padding:6px 9px;border:1px solid var(--line);border-radius:7px;
      background:var(--bg);color:var(--ink);font-size:12.5px}
   textarea{resize:vertical}
@@ -362,6 +367,19 @@
             margin-bottom:11px;background:var(--bg)}
   .stepedit h5{margin:0 0 7px;font-size:12px;font-weight:650;display:flex;gap:8px;
                align-items:center}
+  .srvrow{display:flex;gap:12px;align-items:center;padding:11px 2px;
+          border-bottom:1px solid var(--line);flex-wrap:wrap}
+  .srvrow:last-child{border-bottom:0}
+  .srvrow .who{flex:1 1 240px;min-width:0}
+  .srvrow .who b{font-size:13.5px}
+  .srvrow .who div{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis}
+  .srvstate{font-size:11.5px;font-weight:600;white-space:nowrap}
+  .srvstate.ok{color:var(--ok,#136c34)} .srvstate.todo{color:#b25e00}
+  .srvstate.bad{color:var(--err)}
+  .srvform{border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin:4px 0 12px 0}
+  .srvform label{margin-top:9px}
+  .srvform input[type=text],.srvform input[type=password]{max-width:460px}
+  .srvform .opts label{display:flex;gap:8px;align-items:center;margin:5px 0;font-size:13px}
   .navmore{display:block;width:100%;text-align:left;background:none;border:0;
            cursor:pointer;font:inherit}
   #navMoreItems a{padding-left:22px}
@@ -381,6 +399,9 @@
   .libbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   .libbar input[type=search]{flex:1 1 220px;min-width:160px}
   .libbar select{width:auto;min-width:0}
+  .librun{display:flex;gap:8px;align-items:center;margin-left:auto;white-space:nowrap}
+  .librun label{margin:0;font-size:12px}
+  .librun select{max-width:210px}
   .librow{border-bottom:1px solid var(--line);padding:10px 2px}
   .librow .top{display:flex;gap:9px;align-items:center;cursor:pointer}
   .librow .nm{font-weight:600;font-size:13.5px}
@@ -887,10 +908,11 @@
           <select id="libType" title="type"></select>
           <select id="libPriority" title="priority"></select>
           <select id="libResult" title="how it did on the chosen server"></select>
-          <span class="grow"></span>
-          <label for="libEnv" style="margin:0;font-size:12px">Run on</label>
-          <select id="libEnv"></select>
-          <button class="primary" id="libRun">Run these</button>
+          <span class="librun">
+            <label for="libEnv">Run on</label>
+            <select id="libEnv"></select>
+            <button class="primary" id="libRun">Run these</button>
+          </span>
         </div>
         <div id="libList"></div>
         <div class="btnrow" id="libPager" style="margin-top:10px"></div>
@@ -1112,11 +1134,27 @@
   <!-- ===================================== ENVIRONMENTS -->
   <section class="view" data-view="environments">
     <header>
-      <h2>Environments</h2>
-      <p>Base URL, how to authenticate, and the test data that belongs to that server —
-         named once in <code>environments.json</code> and used by every tool. Credentials
-         never live in it.</p>
+      <h2>Servers</h2>
+      <p>The places your tests can run. The mock is always here; add your dev or staging
+         server to run the very same tests against it.</p>
     </header>
+
+    <div class="card" id="srvCard">
+      <h3>Your servers <span class="grow"></span>
+        <button class="primary sm" id="srvAdd">Add a server</button></h3>
+      <div class="body">
+        <div id="srvForm" hidden></div>
+        <div id="srvList"><span class="hint">Loading…</span></div>
+        <p class="hint" id="srvNote" style="margin-bottom:0"></p>
+      </div>
+    </div>
+
+    <div class="advbar">
+      <button class="sm" id="envAdvToggle" aria-expanded="false">Advanced ▸</button>
+      <span class="hint">Per-server test data, the technical view of every server, and a
+        full check of a server against the API document.</span>
+    </div>
+    <div id="envAdvWrap" hidden>
     <div class="card">
       <h3>Defined environments <span class="grow"></span>
         <button class="sm" id="btnEnvNew">Add an environment</button></h3>
@@ -1267,6 +1305,7 @@
       <div id="liveOutHead" class="banner" hidden></div>
       <div id="liveRows" class="runrows"></div>
       <pre id="liveOut" hidden></pre>
+    </div>
     </div>
   </section>
 

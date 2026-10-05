@@ -3487,6 +3487,185 @@ $("bindRefresh").addEventListener("click", loadBindings);
 
 /* Fix a suite in place rather than regenerating it: the tests somebody already
    reviewed keep their shape, and only the placeholder ids change. */
+/* -------------------------------------------------------------- servers
+   A server is a name, an address, a way of signing in, and whether it is safe
+   to write to. That is all anybody adding "dev" needs to say. Which file it is
+   stored in, what the variables are called and how authentication is modelled
+   are true and still here — under Advanced — but they are not the question. */
+const SRV = { open: null, results: {} };
+
+const SRV_FIELD = (name) => {
+  const low = name.toLowerCase();
+  if (low.endsWith("base_url")) return ["Address", "https://api.dev.example.com", false];
+  if (low.endsWith("username")) return ["Username", "", false];
+  if (low.endsWith("password")) return ["Password", "", true];
+  if (low.endsWith("cookie")) return ["Cookie", "copy it from your browser after logging in", true];
+  if (low.endsWith("token")) return ["Token", "", true];
+  const words = low.replace(/^[a-z0-9]+_/, "").replace(/_/g, " ");
+  return [words.charAt(0).toUpperCase() + words.slice(1), "", false];
+};
+
+function showEnvAdvanced(on) {
+  const open = on === undefined ? $("envAdvWrap").hidden : !!on;
+  $("envAdvWrap").hidden = !open;
+  $("envAdvToggle").textContent = open ? "Advanced ▾" : "Advanced ▸";
+  $("envAdvToggle").setAttribute("aria-expanded", String(open));
+}
+window.showEnvAdvanced = showEnvAdvanced;
+$("envAdvToggle").addEventListener("click", () => showEnvAdvanced());
+
+function srvRender(list) {
+  if (!$("srvList")) return;
+  const mine = (list || []).filter((e) => !e.technical);
+  const hidden = (list || []).length - mine.length;
+  mine.sort((a, b) => (b.builtin - a.builtin) || (b.ready - a.ready) || a.name.localeCompare(b.name));
+  $("srvList").innerHTML = mine.map((e) => {
+    const r = SRV.results[e.name];
+    const state = r ? (r.ok ? ["ok", "Connected"] : ["bad", "Could not connect"])
+      : e.ready ? ["ok", "Ready"] : ["todo", `Needs ${e.needs.join(", ")}`];
+    return `<div class="srvrow" data-srv="${esc(e.name)}">
+      <span class="who"><b>${esc(e.name)}</b>
+        ${e.builtin ? '<span class="tag">built in</span>' : ""}
+        ${e.readonly ? '<span class="tag" title="tests that create, change or delete are refused here">read only</span>' : ""}
+        <div>${esc(e.base_url || "no address yet")}${
+          e.signs_in_with && e.signs_in_with !== "nothing" ? ` · signs in with ${esc(e.signs_in_with)}` : ""}</div>
+        ${r && !r.ok ? `<div style="color:var(--err)">${esc(r.words)}</div>` : ""}
+        ${r && r.ok ? `<div>${esc(r.words)}</div>` : ""}
+      </span>
+      <span class="srvstate ${state[0]}">${esc(state[1])}</span>
+      ${e.builtin ? "" : `<button class="sm" data-srvedit="${esc(e.name)}">${e.ready ? "Edit" : "Finish setup"}</button>`}
+      <button class="sm" data-srvtest="${esc(e.name)}" ${e.ready ? "" : "disabled"}
+              title="${e.ready ? "sign in and make one real call" : "finish setting it up first"}">Test connection</button>
+      ${SRV.open === e.name ? `<div class="srvform" data-srvvars="${esc(e.name)}" style="flex:1 1 100%">loading…</div>` : ""}
+    </div>`;
+  }).join("") || '<div class="empty">No servers yet.</div>';
+  $("srvNote").textContent = hidden
+    ? `${hidden} technical server${hidden === 1 ? "" : "s"} for testing sign-in handling ${hidden === 1 ? "is" : "are"} listed under Advanced.` : "";
+
+  $("srvList").querySelectorAll("[data-srvtest]").forEach((b) =>
+    b.addEventListener("click", () => srvTest(b.dataset.srvtest, b)));
+  $("srvList").querySelectorAll("[data-srvedit]").forEach((b) =>
+    b.addEventListener("click", () => {
+      SRV.open = SRV.open === b.dataset.srvedit ? null : b.dataset.srvedit;
+      srvRender(list);
+    }));
+  if (SRV.open) srvVars(SRV.open);
+}
+
+async function srvTest(name, button) {
+  if (button) { button.disabled = true; button.textContent = "Testing…"; }
+  const { data } = await api("/api/env-login", { method: "POST", body: JSON.stringify({ name }) });
+  SRV.results[name] = data.ok
+    ? { ok: true, words: "Signed in and got an answer — tests can run here." }
+    : { ok: false, words: String(data.error || "It did not answer.").split("\n")[0].slice(0, 260) };
+  banner(data.ok ? "ok" : "err",
+         data.ok ? `${name}: connected.` : `${name}: could not connect. ${SRV.results[name].words}`);
+  await loadEnvironments();
+}
+
+async function srvVars(name) {
+  const host = $("srvList").querySelector(`[data-srvvars="${CSS.escape(name)}"]`);
+  if (!host) return;
+  const { data } = await api(`/api/environments/${encodeURIComponent(name)}/vars`);
+  if (data.error) { host.textContent = data.error; return; }
+  host.innerHTML = (data.fields || []).map((f) => {
+    const [label, hint, secret] = SRV_FIELD(f.name);
+    return `<label>${esc(label)}${f.set ? ' <span class="hint">— already set; leave empty to keep it</span>' : ""}</label>
+      <input type="${secret ? "password" : "text"}" data-var="${esc(f.name)}"
+             placeholder="${esc(f.set && !secret ? (f.hint || "") : hint)}" autocomplete="off">`;
+  }).join("") + `
+    <div class="btnrow" style="margin-top:12px">
+      <button class="primary sm" data-srvsave>Save and test</button>
+      <button class="sm" data-srvcancel>Cancel</button>
+      <span class="hint">Saved on this computer only, never in the shared files.</span>
+    </div>`;
+  host.querySelector("[data-srvcancel]").onclick = () => { SRV.open = null; loadEnvironments(); };
+  host.querySelector("[data-srvsave]").onclick = async () => {
+    const values = {};
+    host.querySelectorAll("[data-var]").forEach((el) => {
+      if (el.value.trim()) values[el.dataset.var] = el.value.trim(); });
+    if (Object.keys(values).length) {
+      const { data: saved } = await api("/api/environments/vars",
+        { method: "POST", body: JSON.stringify({ values }) });
+      if (!saved.ok) { banner("err", saved.error || "could not save"); return; }
+    }
+    SRV.open = null;
+    await loadEnvironments();
+    const now = (ENVS || []).find((e) => e.name === name);
+    if (now && now.ready) await srvTest(name);
+    else banner("err", `${name} still needs ${(now && now.needs || []).join(", ")}.`);
+  };
+}
+
+$("srvAdd").addEventListener("click", () => {
+  const form = $("srvForm");
+  if (!form.hidden) { form.hidden = true; return; }
+  form.hidden = false;
+  form.innerHTML = `<div class="srvform">
+    <b>Add a server</b>
+    <label for="srvName">Name</label>
+    <input type="text" id="srvName" placeholder="dev" autocomplete="off">
+    <label for="srvUrl">Address</label>
+    <input type="text" id="srvUrl" placeholder="https://api.dev.example.com" autocomplete="off">
+    <label>How do you sign in?</label>
+    <div class="opts">
+      <label><input type="radio" name="srvMode" value="none" checked> No sign-in needed</label>
+      <label><input type="radio" name="srvMode" value="cookie"> A cookie from my browser</label>
+      <label><input type="radio" name="srvMode" value="token"> A token</label>
+      <label><input type="radio" name="srvMode" value="login"> A username and password</label>
+    </div>
+    <div id="srvSecrets"></div>
+    <div class="opts"><label><input type="checkbox" id="srvReadonly">
+      Read only — never create, change or delete anything on this server</label></div>
+    <div class="btnrow" style="margin-top:12px">
+      <button class="primary sm" id="srvCreate">Add and test</button>
+      <button class="sm" id="srvCancel">Cancel</button>
+      <span class="hint">What you type is saved on this computer only.</span>
+    </div></div>`;
+  const secrets = () => {
+    const mode = form.querySelector('input[name="srvMode"]:checked').value;
+    $("srvSecrets").innerHTML = mode === "cookie"
+      ? '<label>Cookie</label><input type="password" data-secret="COOKIE" placeholder="copy it from your browser after logging in" autocomplete="off">'
+      : mode === "token" ? '<label>Token</label><input type="password" data-secret="TOKEN" autocomplete="off">'
+      : mode === "login" ? '<label>Username</label><input type="text" data-secret="USERNAME" autocomplete="off">'
+                           + '<label>Password</label><input type="password" data-secret="PASSWORD" autocomplete="off">'
+      : "";
+  };
+  form.querySelectorAll('input[name="srvMode"]').forEach((r) => r.addEventListener("change", secrets));
+  $("srvCancel").onclick = () => { form.hidden = true; };
+  $("srvCreate").onclick = async () => {
+    const name = $("srvName").value.trim().toLowerCase();
+    const url = $("srvUrl").value.trim();
+    if (!/^[a-z0-9][a-z0-9._-]{0,40}$/.test(name)) {
+      banner("err", "Give it a short name using lower-case letters, numbers or dashes — for example dev.");
+      return;
+    }
+    if (!/^https?:\/\//i.test(url)) {
+      banner("err", "The address should start with http:// or https://");
+      return;
+    }
+    const mode = form.querySelector('input[name="srvMode"]:checked').value;
+    $("srvCreate").disabled = true;
+    try {
+      const { data } = await api("/api/environments/create", { method: "POST",
+        body: JSON.stringify({ name, mode, readonly: $("srvReadonly").checked,
+                               description: `${name}, added from the console` }) });
+      if (!data.ok) { banner("err", data.error || "could not add it"); return; }
+      const prefix = name.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "ENV";
+      const values = { [`${prefix}_BASE_URL`]: url };
+      $("srvSecrets").querySelectorAll("[data-secret]").forEach((el) => {
+        if (el.value.trim()) values[`${prefix}_${el.dataset.secret}`] = el.value.trim(); });
+      await api("/api/environments/vars", { method: "POST", body: JSON.stringify({ values }) });
+      form.hidden = true;
+      await loadEnvironments();
+      fillTestEnvs && fillTestEnvs();
+      const now = (ENVS || []).find((e) => e.name === name);
+      if (now && now.ready) await srvTest(name);
+      else banner("ok", `${name} added. It still needs ${(now && now.needs || []).join(", ")} — press Finish setup.`);
+    } finally { if ($("srvCreate")) $("srvCreate").disabled = false; }
+  };
+});
+
 /* ----------------------------------------------------------------- home
    The first screen answers two questions and nothing else: is everything in
    place, and what should I do now. Each line is a fact with one action beside
@@ -3689,7 +3868,8 @@ function libRender() {
     const key = `${t.suite}|${t.stage}|${t.id}`;
     const out = libOutcome(t, env);
     const open = LIB.open === key;
-    const servers = Object.entries(((t.history || {}).by_env) || {}).map(([name, r]) =>
+    const servers = Object.entries(((t.history || {}).by_env) || {})
+      .filter(([name]) => !/^https?:/i.test(name)).map(([name, r]) =>
       `<span class="libres ${r.last_outcome === "pass" ? "pass" : "fail"}"
              title="${esc(r.last_run || "")}">${esc(name)}: ${
         r.last_outcome === "pass" ? "passes" : esc(r.last_outcome || "?")}</span>`).join(" ");
@@ -4034,12 +4214,14 @@ async function loadBaseline() {
   $("baseRun").disabled = false;
   $("baseCount").className = "tag ok";
   $("baseCount").textContent = `${d.tests} ready`;
-  const kinds = Object.entries(d.kinds || {}).map(([k, v]) => `${v} ${k}`).join(" · ");
-  const ran = Object.entries(d.by_env || {}).map(([env, r]) =>
-    `${env}: ${r.pass} of ${r.pass + r.other} passing`).join("  ·  ");
-  const needs = (d.needs_values || []).length
-    ? `  ·  needs a real value for ${d.needs_values.join(", ")}` : "";
-  $("baseState").textContent = [kinds, ran].filter(Boolean).join("  —  ") + needs;
+  // One plain sentence per server it has run on. Runs made from a terminal are
+  // recorded under a raw address rather than a server's name; those are the
+  // same server seen twice, so only named ones are shown.
+  const ran = Object.entries(d.by_env || {}).filter(([env]) => !/^https?:/i.test(env))
+    .map(([env, r]) => `${r.pass} of ${r.pass + r.other} passing on ${env}`).join("  ·  ");
+  const needs = (d.needs_values || []).length;
+  $("baseState").textContent = (ran || "Not run yet.")
+    + (needs ? `  ·  ${needs} need${needs === 1 ? "s" : ""} a value only you know — open it in the list.` : "");
 }
 
 /* The result card lives far down the page. Pressing this and seeing nothing
@@ -4364,7 +4546,9 @@ async function loadEnvironments() {
   const { data } = await api("/api/environments");
   const sel = $("liveEnv");
   const list = data.environments || [];
-  $("navEnvs").textContent = list.length || "";
+  // the sidebar counts the servers a person set up, not the technical variants
+  $("navEnvs").textContent = list.filter((e) => !e.technical).length || "";
+  srvRender(list);
   $("envList").innerHTML = list.length ? `<table>${list.map((e) => `
     <tr>
       <td><b>${esc(e.name)}</b></td>

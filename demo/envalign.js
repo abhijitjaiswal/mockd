@@ -36,6 +36,8 @@ const check = (n, ok, d) => { ok ? pass++ : fail++;
 
   // ------------------------------------------- 1. per-environment test data
   await p.locator('nav.side a[data-view="environments"]').click();
+  // these drive the technical tools kept under Advanced on this screen
+  await p.evaluate(() => window.showEnvAdvanced(true));
   await p.waitForTimeout(1400);
   check("each environment offers its test data",
         await p.locator(".env-data").count() > 0);

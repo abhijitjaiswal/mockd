@@ -166,7 +166,9 @@ function check(name, ok, detail) {
 
   // ---------------------------------------------------------------- environments
   console.log("\nENVIRONMENTS");
-  await p.locator('nav.side a[data-view="environments"]').click(); await p.waitForTimeout(1200);
+  await p.locator('nav.side a[data-view="environments"]').click();
+  // these drive the technical tools kept under Advanced on this screen
+  await p.evaluate(() => window.showEnvAdvanced(true)); await p.waitForTimeout(1200);
   check("environment table rendered", await p.locator("#envList tr").count() > 2);
   check("live-check env dropdown", await p.locator("#liveEnv option").count() > 1);
   await p.locator("#liveUrl").fill("http://127.0.0.1:4010");

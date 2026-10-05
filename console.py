@@ -2243,9 +2243,12 @@ def create_context():
         for key, slot in sorted(bp.families(spec).items()):
             if not slot.get("create"):
                 continue
-            thing = key[-1].rstrip("s").replace("-", " ")
+            # "address" is already singular; chopping every trailing s made it
+            # "addre". And it is "an integration", not "a integration".
+            thing = bp._one(key[-1]).replace("-", " ")
+            article = "an" if thing[:1].lower() in "aeiou" else "a"
             if slot.get("read") or slot.get("list"):
-                examples.append(f"Create a {thing} and check it can be read back")
+                examples.append(f"Create {article} {thing} and check it can be read back")
             if len(examples) >= 4:
                 break
     except Exception:
@@ -3175,8 +3178,30 @@ def list_environments():
             "auth_mode": (env.get("auth") or {}).get("mode", "none"),
             "unresolved": sorted(set(missing)),
             "ready": not missing,
+            # for the plain list: what a person needs to know, in their terms
+            "readonly": bool(env.get("readonly")),
+            "builtin": name == "mock",
+            "technical": name.startswith("mock-"),
+            "signs_in_with": ("a username and password"
+                              if (env.get("auth") or {}).get("mode") == "login"
+                              else "a token" if (env.get("auth") or {}).get("mode") == "token"
+                              else "a cookie" if "Cookie" in (env.get("headers") or {})
+                              else "nothing"),
+            "needs": [_need_words(var) for var in sorted(set(missing))],
         })
     return jsonify({"environments": out})
+
+
+def _need_words(var):
+    """DEV_PASSWORD, said the way a person would say it."""
+    low = var.lower()
+    for ending, words in (("base_url", "its address"), ("username", "a username"),
+                          ("password", "a password"), ("cookie", "a cookie"),
+                          ("token", "a token")):
+        if low.endswith(ending):
+            return words
+    stem = re.sub(r"^[a-z0-9]+_", "", low)            # drop the server's own prefix
+    return "a " + stem.replace("_", " ")
 
 
 @app.get("/api/environments/<name>/data")

@@ -22,6 +22,8 @@ const check = (n, ok, d) => { ok ? pass++ : fail++;
   await p.goto("http://localhost:4100", { waitUntil: "networkidle" });
   await p.waitForTimeout(1800);
   await p.locator('nav.side a[data-view="environments"]').click();
+  // these drive the technical tools kept under Advanced on this screen
+  await p.evaluate(() => window.showEnvAdvanced(true));
   await p.waitForTimeout(1200);
 
   check("there is a way to add one", await p.locator("#btnEnvNew").count() === 1);
