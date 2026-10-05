@@ -324,7 +324,48 @@ def contract_hash(routes):
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
-def lifecycle(key, slot, spec):
+def _one(word):
+    word = str(word or "").lower()
+    if len(word) > 4 and word.endswith("ies"):
+        return word[:-3] + "y"
+    if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+        return word[:-1]
+    return word
+
+
+def plant_references(body, own, data):
+    """Swap the invented foreign keys in a body for named variables.
+
+    A generated uuid in customer_id is well-formed and points at nothing, so
+    the flow passed on a mock that never looked and failed on every server that
+    did. Each one becomes a variable with a placeholder; whoever knows where the
+    id comes from — the bindings, when there is an index — then captures it."""
+    if isinstance(body, dict):
+        for key, value in list(body.items()):
+            low = str(key).lower()
+            noun = _one(re.sub(r"_ids?$", "", low).split("_")[-1])
+            if low.endswith("_id") and isinstance(value, str):
+                if noun == own:
+                    # the new row's own identifier: ours to choose, but a
+                    # constant would collide with itself on the second run
+                    if re.fullmatch(r"[0-9a-fA-F-]{32,36}", value):
+                        body[key] = "{{$uuid}}"
+                    continue
+                name = camel(key)
+                data.setdefault(name, f"<a real {key}>")
+                body[key] = "{{%s}}" % name
+            elif low.endswith("_ids") and isinstance(value, list):
+                name = camel(re.sub(r"s$", "", str(key)))
+                data.setdefault(name, f"<a real {key} entry>")
+                body[key] = ["{{%s}}" % name]
+            elif isinstance(value, (dict, list)):
+                plant_references(value, own, data)
+    elif isinstance(body, list):
+        for item in body:
+            plant_references(item, own, data)
+
+
+def lifecycle(key, slot, spec, index=None):
     """One resource's flow, or None when the document cannot support one."""
     create = slot.get("create")
     if not create:
@@ -442,6 +483,19 @@ def lifecycle(key, slot, spec):
     }
     if cleanup:
         flow["cleanup"] = cleanup
+
+    # foreign keys: named, then captured where the API says where they live
+    data = {}
+    for step in steps:
+        plant_references((step.get("request") or {}).get("body"), _one(key[-1]), data)
+    if data:
+        flow["data"] = data
+        if index:
+            import tests as _tests
+            _tests.rebind_placeholders(flow, index)
+        left = sorted((flow.get("data") or {}))
+        if left:
+            flow["generated"]["needs_values"] = left
     return flow
 
 
@@ -586,7 +640,17 @@ def parameter_cases(spec):
 KINDS = ("lifecycle", "contract", "omission", "parameter")
 
 
-def build(spec, only=None, kinds=KINDS, name="derived"):
+def load_index():
+    """What each endpoint returns, from the mock's last self-check, if any."""
+    try:
+        import bindings
+        return bindings.index_from_report(
+            json.loads((HERE / "logs" / "mock-selfcheck.json").read_text()))
+    except Exception:
+        return {}
+
+
+def build(spec, only=None, kinds=KINDS, name="derived", index=None):
     """Every lifecycle the document supports, as a suite document."""
     flows, skipped = [], []
     for key, slot in sorted(families(spec).items() if "lifecycle" in kinds else []):
@@ -594,7 +658,7 @@ def build(spec, only=None, kinds=KINDS, name="derived"):
         if only and not re.search(only, resource):
             continue
         try:
-            flow = lifecycle(key, slot, spec)
+            flow = lifecycle(key, slot, spec, index)
         except Unsendable as exc:
             skipped.append((resource, f"its create takes {exc} — the runner sends JSON, "
                                   f"so a generated flow here could only fail"))
@@ -648,7 +712,7 @@ def main():
     spec = Spec(text=text, origin=spec_path)
 
     name = Path(args.out).stem if args.out else "derived"
-    suite, skipped = build(spec, only=args.only, name=name,
+    suite, skipped = build(spec, only=args.only, name=name, index=load_index(),
                            kinds=tuple(k.strip() for k in args.kinds.split(",") if k.strip()))
     flows = suite["scenarios"]
 
@@ -669,6 +733,9 @@ def main():
             for step in flow["steps"]:
                 req = step["request"]
                 print(f"      {req['method']:6s} {req['path']}")
+            if flow["generated"].get("needs_values"):
+                print(f"      needs a real value for: "
+                      f"{', '.join(flow['generated']['needs_values'])}")
             if not flow["generated"]["capture_from_schema"]:
                 print(f"      note: the document declares no id in the create "
                       f"response; using the house default")

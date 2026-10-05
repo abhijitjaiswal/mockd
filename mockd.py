@@ -39,6 +39,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import zlib
 from pathlib import Path
 
 import yaml
@@ -1012,7 +1013,7 @@ class StateStore:
                 if isinstance(obj, dict):
                     # store the object exactly as the spec/overlay wrote it —
                     # injecting an `id` it does not declare breaks its own schema
-                    oid = self.identity_of(obj, coll) or uuid.uuid4().hex[:12]
+                    oid = self.identity_of(obj, coll) or str(uuid.uuid4())
                     store.setdefault(oid, obj)
         self.shapes[coll] = (payload, trail)
         return True
@@ -1036,14 +1037,188 @@ class StateStore:
         resp = route["responses"].get(str(code)) or {}
         return resp.get("description")
 
-    def handle(self, route, path_params, body):
+    @staticmethod
+    def _noun(name):
+        """The resource an id names: backup_user_id is a user, address_id an
+        address. The head noun is the last word, singular."""
+        word = re.split(r"[^A-Za-z0-9]+", re.sub(r"_ids?$", "", str(name or "").lower()))
+        word = [w for w in word if w][-1:] or [""]
+        last = word[0]
+        if len(last) > 4 and last.endswith("ies"):
+            return last[:-3] + "y"
+        if len(last) > 3 and last.endswith("s") and not last.endswith("ss"):
+            return last[:-1]
+        return last
+
+    def _held(self, name):
+        noun = self._noun(name)
+        if not noun:
+            return None
+        held, any_ = set(), False
+        for coll, store in self.data.items():
+            # a nested list seeded under a placeholder parent is reachable by
+            # nobody, so its ids are not evidence about anything
+            if "/seed/" in coll + "/" or not store:
+                continue
+            # every list of this resource counts: levels live under each
+            # department, and a level under one is still a level that exists
+            if self._noun(coll.rstrip("/").split("/")[-1]) == noun:
+                held |= set(store)
+                any_ = True
+        return held if any_ else None
+
+    def known(self, name):
+        """The ids this mock holds for the resource an id-field names, or None
+        when it holds nothing for it.
+
+        None is not "no such id" — it is "no evidence". A mock that 404s for a
+        resource it never had rows for would be inventing strictness, exactly as
+        accepting any id for a resource it DOES hold invents laxness."""
+        with self.lock:
+            return self._held(name)
+
+    def link(self):
+        """Make the seeded rows refer to each other.
+
+        Each list is generated on its own, so an order's customer_id was a
+        random uuid that appears in no customer list. Checking references
+        against data like that rejects the mock's own rows. After this pass a
+        foreign key points at a row that exists — the same one every time, so a
+        restart does not reshuffle the world."""
+        with self.lock:
+            # A dropdown or a dashboard is another view of rows that already
+            # exist, not a second population. Seeded on its own it had ids of
+            # its own, so a role picked from the dropdown was a role the roles
+            # list had never heard of. Give each view the ids of what it shows.
+            for coll in list(self.data):
+                parts = coll.rstrip("/").split("/")
+                if len(parts) < 2 or parts[-1].lower() not in self._VIEWS:
+                    continue
+                base = self.data.get("/".join(parts[:-1]))
+                view = self.data[coll]
+                if not base or not view:
+                    continue
+                real, rekeyed = sorted(base), {}
+                for position, (old_id, obj) in enumerate(sorted(view.items())):
+                    if isinstance(obj, dict) and "id" in obj:
+                        obj["id"] = real[position % len(real)]
+                        rekeyed[obj["id"]] = obj
+                    else:
+                        rekeyed[old_id] = obj
+                self.data[coll] = rekeyed
+
+            for coll, store in self.data.items():
+                own = self._noun(coll.rstrip("/").split("/")[-1])
+                for obj in store.values():
+                    self._relink(obj, own, True)
+
+    def _relink(self, node, own, top):
+        if isinstance(node, dict):
+            for key, value in list(node.items()):
+                low = str(key).lower()
+                if low.endswith("_id") and isinstance(value, str):
+                    if top and self._noun(key) == own:
+                        continue                    # the row's own identity
+                    held = self._held(key)
+                    if held and value not in held:
+                        ordered = sorted(held)
+                        node[key] = ordered[zlib.crc32(value.encode()) % len(ordered)]
+                elif low.endswith("_ids") and isinstance(value, list):
+                    held = self._held(key)
+                    if held:
+                        ordered = sorted(held)
+                        node[key] = [v if v in held else
+                                     ordered[zlib.crc32(str(v).encode()) % len(ordered)]
+                                     for v in value]
+                elif isinstance(value, (dict, list)):
+                    self._relink(value, own, False)
+        elif isinstance(node, list):
+            for item in node:
+                self._relink(item, own, False)
+
+    def missing_reference(self, path_params):
+        """A path id that names a resource this mock holds, and is not in it.
+
+        PUT /orders/post/{order_id} with a made-up id used to answer 200,
+        because that path is not the order's own item route and the store was
+        never asked. A real server says 404, and a test of that is right."""
+        for name, value in (path_params or {}).items():
+            if not str(name).lower().endswith("_id"):
+                continue
+            held = self.known(name)
+            if held is not None and str(value) not in held:
+                return name, value
+        return None
+
+    def unknown_references(self, body, prefix="", own=None):
+        """Body fields that point at something this mock holds, and miss.
+
+        An invented uuid in department_id passes every schema check — it is a
+        well-formed uuid — and is rejected by any real server, which looks the
+        row up. Without this the mock was green for a test that could only ever
+        fail anywhere else."""
+        found = []
+        if isinstance(body, dict):
+            for key, value in body.items():
+                low = str(key).lower()
+                if low.endswith("_id") and isinstance(value, (str, int)):
+                    # device_id in a body sent to /device is the new device's
+                    # own identifier, not a pointer at an existing one
+                    if not prefix and own and self._noun(key) == own:
+                        continue
+                    held = self.known(key)
+                    if held is not None and str(value) not in held:
+                        found.append((f"{prefix}{key}", value))
+                elif low.endswith("_ids") and isinstance(value, list):
+                    held = self.known(key)
+                    if held is not None:
+                        for item in value:
+                            if isinstance(item, (str, int)) and str(item) not in held:
+                                found.append((f"{prefix}{key}", item))
+                                break
+                elif isinstance(value, (dict, list)):
+                    found += self.unknown_references(value, f"{prefix}{key}.")
+        elif isinstance(body, list):
+            for item in body[:5]:
+                found += self.unknown_references(item, prefix)
+        return found
+
+    # path endings that show existing rows a different way
+    _VIEWS = {"dropdown", "dashboard", "all", "search", "options", "summary"}
+
+    # never filters: they shape a page, they do not select rows
+    _PAGING = {"page", "page_size", "limit", "offset", "per_page", "size", "sort",
+               "sort_by", "sort_order", "order", "order_by", "search", "q"}
+
+    def _filtered(self, route, items, query):
+        """Apply the query filters the document declares.
+
+        ?department_id=X returned every row whatever X was, so a test asserting
+        that the first row belongs to X failed on the mock and passed on a real
+        server. Only declared parameters whose name is a field of the stored
+        rows are applied — anything else is not ours to interpret."""
+        if not query:
+            return items
+        declared = {p.get("name") for p in (route.get("parameters") or [])
+                    if p.get("in") == "query"}
+        for name, wanted in query.items():
+            if name not in declared or name in self._PAGING or wanted in (None, ""):
+                continue
+            if not any(isinstance(i, dict) and name in i for i in items):
+                continue
+            want = str(wanted).lower()
+            items = [i for i in items if isinstance(i, dict)
+                     and str(i.get(name)).lower() == want]
+        return items
+
+    def handle(self, route, path_params, body, query=None):
         method = route["method"]
         coll, item_id = self.collection_of(route, path_params)
         with self.lock:
             store = self.data.setdefault(coll, {})
             if method == "POST" and item_id is None:
                 obj = dict(body or {})
-                oid = self.identity_of(obj, coll) or uuid.uuid4().hex[:12]
+                oid = self.identity_of(obj, coll) or str(uuid.uuid4())
                 obj.setdefault("id", oid)
                 store[oid] = obj
                 return 201 if "201" in route["responses"] else 200, obj
@@ -1073,7 +1248,8 @@ class StateStore:
                                (200, {"message": "deleted", "id": item_id})
                     return 404, {"error": "not found", "id": item_id}
             if method == "GET" and store:
-                return 200, self.envelope(coll, list(store.values()))
+                return 200, self.envelope(
+                    coll, self._filtered(route, list(store.values()), query))
         return None, None   # nothing stored yet -> fall through to spec/overlay
 
 
@@ -1414,6 +1590,7 @@ def build_app(spec_path, stateful=False, log_path=Path("logs/requests.jsonl"),
                     r, {n: "seed" for n in r["path_params"]})
                 if item_id is None:
                     store.seed(coll, body)
+        store.link()
 
     watcher = SpecWatcher(spec_path, overlay_path, on_reload=seed,
                           headers=headers, poll=poll, cache_dir=str(log_path.parent))
@@ -1543,7 +1720,39 @@ def build_app(spec_path, stateful=False, log_path=Path("logs/requests.jsonl"),
                             "operation": route["key"]}), 400
 
         if stateful and not forced and not example and not scenario and not nulls:
-            code, body = store.handle(route, path_params, request.get_json(silent=True))
+            sent = request.get_json(silent=True)
+            documented = {str(k) for k in route["responses"]}
+
+            # Does every id in this request refer to something that exists here?
+            stray = store.missing_reference(path_params)
+            if stray and "404" in documented:
+                code, body, src = pick_response(route, overlay, forced_status="404",
+                                                rng=random.Random(route["key"]), spec=spec)
+                entry.update(status=code, source="stateful+missing:" + stray[0])
+                record(entry)
+                resp = jsonify(body)
+                resp.headers["X-Mock-Source"] = "stateful+" + src
+                resp.headers["X-Mock-Missing"] = stray[0]
+                return resp, code
+
+            if request.method in ("POST", "PUT", "PATCH") and ({"422", "400"} & documented):
+                coll_, _ = StateStore.collection_of(route, path_params)
+                dangling = store.unknown_references(
+                    sent, own=store._noun(coll_.rstrip("/").split("/")[-1]))
+                if dangling:
+                    errors = [{"in": "body", "field": field,
+                               "error": f"{value!r} does not refer to anything that exists"}
+                              for field, value in dangling]
+                    code, body = as_documented_validation_error(route, errors)
+                    entry.update(status=code, source="stateful+dangling",
+                                 validation_errors=errors)
+                    record(entry)
+                    resp = jsonify(body)
+                    resp.headers["X-Mock-Source"] = "stateful+dangling"
+                    resp.headers["X-Mock-Violations"] = str(len(errors))
+                    return resp, code
+
+            code, body = store.handle(route, path_params, sent, request.args.to_dict())
             if code == 404 and "404" in route["responses"]:
                 # the spec documents its own not-found payload — serve that
                 # rather than the store's bare {"error": "not found"}

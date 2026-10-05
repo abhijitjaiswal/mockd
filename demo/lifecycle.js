@@ -97,9 +97,17 @@ process.on("exit", () => {
     const steps = flows.flatMap((f) => f.steps || []);
     check("a flow has exactly one target",
           flows.every((f) => (f.steps || []).filter((s) => s.role === "target").length === 1));
+    // A flow's own steps take their statuses from the document (`in: [...]`),
+    // and the one exact status they may assert is the documented 404 after a
+    // delete. The reads added in front to fetch ids are plain GETs expecting 200.
     check("no step asserts a status its operation never documents",
           steps.every((s) => (s.assertions || []).every((a) =>
-            a.type !== "status" || a.equals === undefined || a.equals === 404)));
+            a.type !== "status" || a.equals === undefined || a.equals === 404
+            || (s.role === "setup" && a.equals === 200))));
+    check("a flow that needs another record's id reads it rather than inventing one",
+          flows.every((f) => !JSON.stringify(f.steps).match(
+            /"[a-z_]+_id":\s*"[0-9a-f]{8}-[0-9a-f]{4}-/)),
+          "a literal uuid is sitting in a foreign-key field");
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

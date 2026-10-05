@@ -1532,7 +1532,8 @@ def tests_blueprint():
         return jsonify({"ok": False, "error": f"could not read {spec_path}: {exc}"}), 400
 
     name = (payload.get("suite") or "derived").strip() or "derived"
-    suite, skipped = bp.build(spec, only=(payload.get("only") or None), name=name)
+    suite, skipped = bp.build(spec, only=(payload.get("only") or None), name=name,
+                              index=id_index())
     flows = suite["scenarios"]
     summary = [{
         "id": flow["id"],

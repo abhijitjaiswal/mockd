@@ -175,6 +175,92 @@ def group_runid():
                t.interpolate("{{$uuid}}", {}) != t.interpolate("{{$uuid}}", {}))
 
 
+def group_references():
+    """A mock that knows which rows exist, and says so."""
+    import mockd as m
+    import blueprint as b
+
+    store = m.StateStore()
+    store.data = {
+        "/api/v1/customers": {"c-1": {"id": "c-1", "region": "north"},
+                              "c-2": {"id": "c-2", "region": "south"}},
+        "/api/v1/customers/dropdown": {"x-9": {"id": "x-9", "label": "one"}},
+        "/api/v1/orders": {"o-1": {"id": "o-1", "customer_id": "made-up",
+                                   "lines": [{"backup_customer_id": "also-made-up"}]}},
+        "/api/v1/orders/seed/notes": {"n-1": {"id": "n-1"}},
+    }
+
+    check("known: a resource the mock holds has its ids",
+          store.known("customer_id"), {"c-1", "c-2"})
+    check("known: a compound name is read by its last word",
+          store.known("backup_customer_id"), {"c-1", "c-2"})
+    check("known: a resource it holds nothing for is no evidence, not 'none exist'",
+          store.known("warehouse_id"), None)
+    check("known: a list seeded under a placeholder parent is not evidence",
+          store.known("note_id"), None)
+
+    check("path: an id that is not held is reported",
+          store.missing_reference({"customer_id": "nope"}), ("customer_id", "nope"))
+    check("path: one that is held is fine",
+          store.missing_reference({"customer_id": "c-1"}), None)
+    check("path: an id for a resource it knows nothing about is left alone",
+          store.missing_reference({"warehouse_id": "anything"}), None)
+
+    check("body: a made-up reference is caught",
+          store.unknown_references({"customer_id": "nope"}), [("customer_id", "nope")])
+    check("body: so is one nested in a list",
+          store.unknown_references({"lines": [{"customer_id": "nope"}]}),
+          [("lines.customer_id", "nope")])
+    check("body: a list of ids is checked too",
+          store.unknown_references({"customer_ids": ["c-1", "nope"]}),
+          [("customer_ids", "nope")])
+    check("body: real references pass",
+          store.unknown_references({"customer_id": "c-2", "customer_ids": ["c-1"]}), [])
+    check("body: a new row's own identifier is not a reference",
+          store.unknown_references({"customer_id": "brand-new"}, own="customer"), [])
+
+    route = {"parameters": [{"name": "region", "in": "query"},
+                            {"name": "page", "in": "query"}]}
+    rows = list(store.data["/api/v1/customers"].values())
+    check("filter: a declared parameter that is a field narrows the rows",
+          [r["id"] for r in store._filtered(route, rows, {"region": "south"})], ["c-2"])
+    check("filter: a value nothing has returns nothing",
+          store._filtered(route, rows, {"region": "west"}), [])
+    check("filter: paging words never select rows",
+          len(store._filtered(route, rows, {"page": "2"})), 2)
+    check("filter: an undeclared parameter is not ours to interpret",
+          len(store._filtered(route, rows, {"colour": "red"})), 2)
+
+    store.link()
+    order = store.data["/api/v1/orders"]["o-1"]
+    check_true("link: a seeded foreign key now points at a row that exists",
+               order["customer_id"] in {"c-1", "c-2"}, order)
+    check_true("link: nested ones too",
+               order["lines"][0]["backup_customer_id"] in {"c-1", "c-2"}, order)
+    check_true("link: a dropdown shows the ids of the rows it lists",
+               set(store.data["/api/v1/customers/dropdown"]) <= {"c-1", "c-2"},
+               list(store.data["/api/v1/customers/dropdown"]))
+    check("link: a row keeps its own id", order["id"], "o-1")
+
+    # the generator must not invent what the mock would now refuse
+    body = {"customer_id": "11111111-2222-3333-4444-555555555555", "order_id": "new",
+            "lines": [{"courier_ids": ["x"], "note": "keep"}]}
+    data = {}
+    b.plant_references(body, "order", data)
+    check("plant: a foreign key becomes a named variable",
+          body["customer_id"], "{{customerId}}")
+    check("plant: the new row's own id is left as it was", body["order_id"], "new")
+    own = {"order_id": "11111111-2222-3333-4444-555555555555"}
+    b.plant_references(own, "order", {})
+    check("plant: unless it is a uuid, which must differ on every run",
+          own["order_id"], "{{$uuid}}")
+    check("plant: a list of ids becomes a one-item list of a variable",
+          body["lines"][0]["courier_ids"], ["{{courierId}}"])
+    check("plant: other fields are untouched", body["lines"][0]["note"], "keep")
+    check_true("plant: each variable starts as an honest placeholder",
+               all(v.startswith("<") for v in data.values()) and len(data) == 2, data)
+
+
 def group_record():
     """A test as something to manage: how much it matters, whether it is in use."""
     import tests as t
@@ -1031,6 +1117,7 @@ GROUPS = {
     "runid": group_runid,
     "rebind": group_rebind,
     "record": group_record,
+    "references": group_references,
     "story": group_story,
     "blueprint": group_blueprint,
     "import": group_import,

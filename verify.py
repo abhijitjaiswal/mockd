@@ -247,6 +247,30 @@ class IdPool:
         return param_name == "id" or param_name.endswith("_id") \
             or schema.get("format") == "uuid"
 
+    def ground(self, node, path, rng, changed=None):
+        """Replace generated ids in a body with ids harvested during this run.
+        Returns the names that were replaced."""
+        changed = [] if changed is None else changed
+        if isinstance(node, dict):
+            for key, value in list(node.items()):
+                low = str(key).lower()
+                if low.endswith(("_id", "_ids")) and isinstance(value, (str, list)):
+                    stem = re.sub(r"_ids?$", "", low)
+                    # backup_user_id is a user: try the whole name, then its
+                    # last word, which is the resource it actually refers to
+                    for name in (stem + "_id", stem.split("_")[-1] + "_id"):
+                        seen, origin = self.value_for(name, "/" + name[:-3], None, rng)
+                        if origin.startswith(("harvested", "fixture")):
+                            node[key] = [seen] if isinstance(value, list) else seen
+                            changed.append(key)
+                            break
+                elif isinstance(value, (dict, list)):
+                    self.ground(value, path, rng, changed)
+        elif isinstance(node, list):
+            for item in node:
+                self.ground(item, path, rng, changed)
+        return changed
+
     def value_for(self, param_name, path, schema, rng):
         """Pinned fixture, then an id this operation's OWN collection returned,
         then one seen elsewhere, then a generated one — and say which, so a 404
@@ -393,6 +417,12 @@ def build_request(route, base_url, pool, rng, send_optional_query=False):
     media = (route["request_body"].get("content") or {}).get("application/json")
     if media and media.get("schema"):
         body = generate_from_schema(media["schema"], rng, array_items=1)
+        # A generated uuid in customer_id is well-formed and refers to nothing,
+        # so any server that looks the row up rejects the write and the sweep
+        # learns only that validation works. Use ids this run has actually seen.
+        grounded = pool.ground(body, route["path"], rng)
+        if grounded:
+            notes.append("body ids from this run: " + ", ".join(grounded))
 
     url = base_url.rstrip("/") + path
     if query:
