@@ -878,10 +878,18 @@ class Runner:
                 "blocked_by": blocked_by if outcome == BLOCKED else None}
 
     # -- a whole suite -----------------------------------------------------
-    def selects(self, test, suite, only=None, tags=None, levels=None, modules=None):
+    def selects(self, test, suite, only=None, tags=None, levels=None, modules=None,
+                priorities=None):
         """Every filter in one place, so a case and a scenario cannot drift
         apart in which runs they appear in."""
         if only and not re.search(only, f"{test.get('id', '')} {test.get('name', '')}"):
+            return False
+        # A retired test never runs. A blocked one runs only when somebody asks
+        # for it by name — which is how you find out it is no longer blocked.
+        state = status_of(test)
+        if state == "retired" or (state == "blocked" and not only):
+            return False
+        if priorities and priority_of(test) not in {str(p).upper() for p in priorities}:
             return False
         if tags and not (set(tags) & set(test.get("tags", []))):
             return False
@@ -892,23 +900,24 @@ class Runner:
         return True
 
     def run_suite(self, suite, only=None, kinds=None, tags=None, levels=None,
-                  modules=None):
+                  modules=None, priorities=None):
         data = interpolate(suite.get("data") or {}, {}, strict=False)
         results = []
 
         for case in suite.get("cases") or []:
             if kinds and "case" not in kinds:
                 continue
-            if not self.selects(case, suite, only, tags, levels, modules):
+            if not self.selects(case, suite, only, tags, levels, modules, priorities):
                 continue
-            results.append(self.run_case(case, data))
+            results.append({**self.run_case(case, data), **record_of(case)})
 
         for scenario in suite.get("scenarios") or []:
             if kinds and scenario.get("kind", "api") not in kinds:
                 continue
-            if not self.selects(scenario, suite, only, tags, levels, modules):
+            if not self.selects(scenario, suite, only, tags, levels, modules,
+                                priorities):
                 continue
-            results.append(self.run_scenario(scenario, data))
+            results.append({**self.run_scenario(scenario, data), **record_of(scenario)})
         return results
 
 
@@ -1042,7 +1051,13 @@ def write_html(all_results, path, env=None, base_url=None, digest=None):
         f"<td><b>{escape(str(item.get('name') or item.get('id')))}</b>"
         f"<div class='muted'>{escape(str(item.get('id', '')))}"
         + (f" · {escape(', '.join(item.get('levels') or []))}"
-           if item.get("levels") else "") + "</div></td>"
+           if item.get("levels") else "")
+        + (f" · {escape(str(item.get('priority')))}" if item.get("priority") else "")
+        + (f" · {escape(str(item.get('owner')))}" if item.get("owner") else "")
+        + (f" · {escape(', '.join(item.get('links') or []))}"
+           if item.get("links") else "") + "</div>"
+        + (f"<div class='muted'>{escape(str(item.get('description')))}</div>"
+           if item.get("description") else "") + "</td>"
         f"<td>{len(steps_of(item))}</td>"
         f"<td><details><summary>show</summary>{detail_html(item)}</details></td></tr>"
         for suite_name, item, outcome in rows)
@@ -1230,6 +1245,56 @@ LEVEL_MEANING = {
     "negative": "the API refusing what it should refuse, in the shape it documents",
     "performance": "it answered, but did it answer in time",
 }
+
+
+# A test is also a record somebody has to manage: how much it matters, whether
+# it is in use, whose it is, and what it traces back to. Without these a suite
+# is a pile — nobody can say which fifty of five hundred to run before a
+# release, or which one a ticket was about.
+PRIORITIES = ("P0", "P1", "P2", "P3")
+PRIORITY_MEANING = {
+    "P0": "the product is unusable without this — run it on every change",
+    "P1": "a main path — run it before every release",
+    "P2": "ordinary behaviour — run it regularly",
+    "P3": "an edge or a nicety — run it when there is time",
+}
+DEFAULT_PRIORITY = "P2"
+
+STATUSES = ("ready", "blocked", "retired")
+STATUS_MEANING = {
+    "ready": "in use",
+    "blocked": "waiting on something — kept, but left out of runs until it is unblocked",
+    "retired": "no longer relevant — kept for the record, never run",
+}
+
+
+def priority_of(test):
+    value = str(test.get("priority") or "").upper()
+    return value if value in PRIORITIES else DEFAULT_PRIORITY
+
+
+def status_of(test):
+    value = str(test.get("status") or "").lower()
+    return value if value in STATUSES else "ready"
+
+
+def links_of(test):
+    """Tickets or documents this test traces to, as plain strings.
+
+    Deliberately not tied to one tracker: a key like PROJ-123 or a URL both
+    belong here, and whatever integration comes later can read either."""
+    raw = test.get("links") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
+def record_of(test):
+    """The managed part of a test, with defaults filled in."""
+    return {"priority": priority_of(test), "status": status_of(test),
+            "owner": str(test.get("owner") or "").strip(),
+            "links": links_of(test),
+            "description": str(test.get("description") or "").strip()}
 
 
 def levels_of(test):
@@ -1434,6 +1499,7 @@ def taxonomy(suites):
     The console builds its pickers from this and the CI generator writes the
     same names into a pipeline, so the two can never offer different choices."""
     modules, levels, kinds = {}, {}, {}
+    priorities, statuses = {}, {}
     total = 0
     for suite in suites:
         for item in (suite.get("cases") or []):
@@ -1442,8 +1508,15 @@ def taxonomy(suites):
         for item in (suite.get("scenarios") or []):
             _count(item, suite, item.get("kind", "api"), modules, levels, kinds)
             total += 1
+        for item in (suite.get("cases") or []) + (suite.get("scenarios") or []):
+            priorities[priority_of(item)] = priorities.get(priority_of(item), 0) + 1
+            statuses[status_of(item)] = statuses.get(status_of(item), 0) + 1
     return {
         "total": total,
+        "priorities": [{"name": k, "tests": priorities.get(k, 0),
+                        "means": PRIORITY_MEANING[k]} for k in PRIORITIES],
+        "statuses": [{"name": k, "tests": statuses.get(k, 0),
+                      "means": STATUS_MEANING[k]} for k in STATUSES],
         "modules": [{"name": k, "tests": v} for k, v in sorted(modules.items())],
         "levels": [{"name": k, "tests": levels.get(k, 0), "means": LEVEL_MEANING[k]}
                    for k in LEVELS],
@@ -1474,6 +1547,19 @@ def validate_test(test, kind=None):
         errors.append("missing `id`")
     elif not re.fullmatch(r"[A-Za-z0-9._-]+", str(test["id"])):
         errors.append(f"{ident}: `id` may only contain letters, digits, . _ -")
+
+    if test.get("priority") is not None \
+            and str(test["priority"]).upper() not in PRIORITIES:
+        errors.append(f"{ident}: priority {test['priority']!r} is not one of "
+                      f"{', '.join(PRIORITIES)}")
+    if test.get("status") is not None and str(test["status"]).lower() not in STATUSES:
+        errors.append(f"{ident}: status {test['status']!r} is not one of "
+                      f"{', '.join(STATUSES)}")
+    if test.get("links") is not None and not isinstance(test["links"], (list, str)):
+        errors.append(f"{ident}: `links` must be a list of ticket keys or URLs")
+    for key in ("owner", "description"):
+        if test.get(key) is not None and not isinstance(test[key], str):
+            errors.append(f"{ident}: `{key}` must be text")
 
     for level in (test.get("levels") or []):
         if str(level).lower() not in LEVELS:
@@ -2616,6 +2702,9 @@ def story_pack(spec, story, existing=None, limit=6, samples=None, criteria=None,
         "    never a constant, or the second run collides with the first",
         "  * anything a flow creates gets a cleanup step that deletes it",
         "  * give every test `levels`, one of: " + ", ".join(LEVELS),
+        "  * give every test a `priority` (" + ", ".join(PRIORITIES) + " — P0 is what",
+        "    must never break) and a one-sentence `description` a non-engineer",
+        "    could read",
         "  * a flow whose earlier steps only make the target reachable is",
         "    kind \"api\"; a flow where every step matters is kind \"e2e\"",
         "  * assert what the story promises, not merely that a 200 came back",
@@ -2817,6 +2906,8 @@ def main():
     run.add_argument("--level", action="append", choices=list(LEVELS),
                      help="how far to run: smoke, sanity, regression, negative, "
                           "performance. Repeatable.")
+    run.add_argument("--priority", action="append", choices=list(PRIORITIES),
+                     help="how much it matters; repeatable. P0 is what must never break")
     run.add_argument("--module", action="append",
                      help="which part of the API, as named by the suite. Repeatable.")
     run.add_argument("--var", action="append", default=[], metavar="name=value",
@@ -3003,7 +3094,7 @@ def main():
         if overrides:
             suite = {**suite, "data": {**(suite.get("data") or {}), **overrides}}
         results = runner.run_suite(suite, args.only, kinds, args.tag,
-                                   args.level, args.module)
+                                   args.level, args.module, args.priority)
         for item in results:
             if item["outcome"] != PASS:
                 key = f"{suite['name']}/{item.get('id') or item.get('name')}"

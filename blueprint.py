@@ -429,6 +429,9 @@ def lifecycle(key, slot, spec):
         "kind": "e2e",
         "levels": ["sanity"],
         "tags": ["lifecycle", "generated"],
+        "priority": "P1",
+        "description": f"A {name} can be created, read back, changed, found in the "
+                       f"list and removed — the whole life of one record.",
         "steps": steps,
         "generated": {
             "by": "blueprint",
@@ -484,6 +487,9 @@ def contract_cases(spec):
             "id": f"{slug(route)}-contract",
             "name": f"{route['key']} answers what it documents",
             "levels": ["smoke"], "tags": ["contract", "generated"],
+            "priority": "P0",
+            "description": f"Calling {route['key']} returns the status and shape the "
+                           f"API document promises.",
             "request": {"method": route["method"], "path": route["path"],
                         **({"query": query} if query else {})},
             "assertions": assertions,
@@ -521,6 +527,9 @@ def omission_cases(spec):
             "id": f"{slug(route)}-without-{re.sub(r'[^a-z0-9]+', '-', dropped.lower())}",
             "name": f"{route['key']} rejects a body with no {dropped}",
             "levels": ["negative"], "tags": ["validation", "generated"],
+            "priority": "P2",
+            "description": f"Sending {route['key']} without the required field "
+                           f"{dropped} is refused, as the API document says it must be.",
             "request": {"method": route["method"], "path": route["path"],
                         "body": {k: v for k, v in body.items() if k != dropped}},
             "assertions": [{"type": "status", "in": expect}],
@@ -563,6 +572,8 @@ def parameter_cases(spec):
                       f"-out-of-range",
                 "name": f"{route['key']} rejects {name} that {why}",
                 "levels": ["negative"], "tags": ["validation", "generated"],
+                "priority": "P3",
+                "description": f"{route['key']} refuses a value for {name} that {why}.",
                 "request": {"method": route["method"], "path": route["path"],
                             "query": {name: value}},
                 "assertions": [{"type": "status", "equals": 422}],

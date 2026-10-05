@@ -850,6 +850,7 @@ async function loadTests() {
   // reassigned below when a label is selected — `const` here threw on every
   // click, which aborted the redraw and made the filter look like it did nothing
   let suites = data.suites || [];
+  TESTS_CACHE = suites;
   const total = suites.reduce((n, s) => n + s.cases.length + s.scenarios.length, 0);
   $("testCount").textContent = total ? `${total} in ${suites.length} section(s)` : "none yet";
   $("navTests").textContent = total || "";
@@ -919,6 +920,10 @@ async function loadTests() {
         >run</button>
       <button class="sm tact" data-act="edit" data-suite="${esc(suite)}"
               data-stage="${esc(stage)}" data-id="${esc(id)}">edit</button>
+      <button class="sm tact" data-act="record" data-suite="${esc(suite)}"
+              data-stage="${esc(stage)}" data-id="${esc(id)}"
+              title="priority, status, owner, linked ticket and what it is for"
+        >details</button>
       ${canPromote ? `<button class="sm tact" data-act="promote" data-suite="${esc(suite)}"
           data-stage="${esc(stage)}" data-id="${esc(id)}" ${proven ? "" : "disabled"}
           title="${proven ? "move into the shared suite"
@@ -928,6 +933,20 @@ async function loadTests() {
     </span>`;
   };
 
+  /* How a test is managed, at a glance: how much it matters, whether it is in
+     use, whose it is and what it traces to. */
+  const recordLine = (t) => `
+    <div class="recmeta">
+      <span class="prio ${esc(t.priority)}">${esc(t.priority)}</span>
+      ${(t.levels || []).map(esc).join(" · ")}
+      ${t.status && t.status !== "ready" ? ` · <b>${esc(t.status)}</b>` : ""}
+      ${t.owner ? ` · ${esc(t.owner)}` : ""}
+      ${(t.links || []).length ? ` · ${t.links.map(esc).join(", ")}` : ""}
+    </div>
+    ${t.description ? `<div class="recmeta">${esc(t.description)}</div>` : ""}`;
+  const recordHost = (s, t) =>
+    `<div data-rechost="${esc(s.name)}|${esc(s.stage)}|${esc(t.id)}"></div>`;
+
   const caseBlock = (s, c) => `
     <div class="titem">
       <div class="head">
@@ -935,11 +954,13 @@ async function loadTests() {
         <span class="label">
           <div class="t">${esc(c.name || c.id)}</div>
           <div class="sub">${esc(c.method)} ${esc(c.path)}</div>
+          ${recordLine(c)}
         </span>
         <span class="tag">${c.assertions} assertion${c.assertions === 1 ? "" : "s"}</span>
         ${OUT(c.history)}
         ${acts(s.name, c.id, s.stage, c.history)}
       </div>
+      ${recordHost(s, c)}
     </div>`;
 
   const KIND_NOTE = {
@@ -955,10 +976,12 @@ async function loadTests() {
           <div class="t">${esc(sc.name || sc.id)}</div>
           <div class="sub">${sc.steps.length} step${sc.steps.length === 1 ? "" : "s"}
             · ${esc(KIND_NOTE[sc.kind] || "")}</div>
+          ${recordLine(sc)}
         </span>
         ${OUT(sc.history)}
         ${acts(s.name, sc.id, s.stage, sc.history)}
       </div>
+      ${recordHost(s, sc)}
       <div class="steps">
         ${sc.steps.map((st, i) => `
           <div class="stepline">
@@ -1234,6 +1257,10 @@ async function testAction(act, suite, id, stage) {
     await wbLoad(suite, id, stage);
     return;
   }
+  if (act === "record") {
+    openRecordEditor(suite, stage, id);
+    return;
+  }
   if (act === "run" || act === "run-suite") {
     // --only is matched against "id name", so anchoring both ends finds
     // nothing; anchor the start and require a boundary after the id, or
@@ -1368,6 +1395,53 @@ function fillTestEnvs() {
 
 /* Levels and modules come from the taxonomy the runner itself uses, counts and
    all — so what is offered here is exactly what can be selected. */
+/* Change how a test is managed without opening what it does. Re-prioritising
+   before a release should not mean editing steps. */
+let TESTS_CACHE = [];
+function openRecordEditor(suite, stage, id) {
+  const host = document.querySelector(
+    `[data-rechost="${CSS.escape(suite)}|${CSS.escape(stage)}|${CSS.escape(id)}"]`);
+  if (!host) return;
+  if (host.innerHTML) { host.innerHTML = ""; return; }      // second click closes
+  const found = (TESTS_CACHE.find((s) => s.name === suite && s.stage === stage) || {});
+  const t = [...(found.cases || []), ...(found.scenarios || [])]
+    .find((x) => x.id === id) || {};
+  const opt = (values, current) => values.map((v) =>
+    `<option value="${v}"${v === current ? " selected" : ""}>${v}</option>`).join("");
+  const LV = ["smoke", "sanity", "regression", "negative", "performance"];
+  host.innerHTML = `
+    <div class="receditor">
+      <div><label>Priority</label>
+        <select data-f="priority">${opt(["P0", "P1", "P2", "P3"], t.priority || "P2")}</select></div>
+      <div><label>Status</label>
+        <select data-f="status">${opt(["ready", "blocked", "retired"], t.status || "ready")}</select></div>
+      <div><label>Owner</label>
+        <input type="text" data-f="owner" value="${esc(t.owner || "")}" placeholder="who looks after it"></div>
+      <div><label>Ticket or link</label>
+        <input type="text" data-f="links" value="${esc((t.links || []).join(", "))}" placeholder="PROJ-123"></div>
+      <div class="wide"><label>Types — a test can be several</label>
+        ${LV.map((l) => `<label style="display:inline-flex;gap:4px;margin-right:12px;font-size:12px">
+          <input type="checkbox" data-level="${l}"${(t.levels || []).includes(l) ? " checked" : ""}>${l}</label>`).join("")}</div>
+      <div class="wide"><label>What this test is for, in plain words</label>
+        <input type="text" data-f="description" value="${esc(t.description || "")}"
+               placeholder="A new record can be created and shows up in the list"></div>
+      <div class="wide btnrow">
+        <button class="primary sm" data-recsave>Save</button>
+        <button class="sm" data-reccancel>Cancel</button></div>
+    </div>`;
+  host.querySelector("[data-reccancel]").onclick = () => { host.innerHTML = ""; };
+  host.querySelector("[data-recsave]").onclick = async () => {
+    const fields = {};
+    host.querySelectorAll("[data-f]").forEach((el) => { fields[el.dataset.f] = el.value.trim(); });
+    fields.levels = [...host.querySelectorAll("[data-level]:checked")].map((el) => el.dataset.level);
+    const { data } = await api("/api/tests/record", {
+      method: "POST", body: JSON.stringify({ suite, stage, id, fields }) });
+    if (!data.ok) { banner("err", (data.errors || [data.error]).join("  ·  ")); return; }
+    banner("ok", `Saved ${id}.`);
+    await loadTests(); fillTestSelectors();
+  };
+}
+
 async function fillTestSelectors() {
   const { data } = await api("/api/tests/taxonomy");
   if (!data || !data.levels) return;
@@ -1376,6 +1450,9 @@ async function fillTestSelectors() {
     + `${esc(l.name)} (${l.tests}) — ${esc(l.means)}</option>`).join("");
   $("testModules").innerHTML = (data.modules || []).map((m) =>
     `<option value="${esc(m.name)}">${esc(m.name)} (${m.tests})</option>`).join("");
+  $("testPriorities").innerHTML = (data.priorities || []).map((p) =>
+    `<option value="${esc(p.name)}"${p.tests ? "" : " disabled"}>`
+    + `${esc(p.name)} (${p.tests}) — ${esc(p.means)}</option>`).join("");
 }
 
 const pickedValues = (id) => [...$(id).selectedOptions].map((o) => o.value);
@@ -1397,6 +1474,7 @@ async function runTests(kinds) {
     method: "POST",
     body: JSON.stringify({ env: $("testEnv").value, kinds, verbose: false,
                            levels: pickedValues("testLevels"),
+                           priorities: pickedValues("testPriorities"),
                            modules: pickedValues("testModules"),
                            only: $("testOnly").value.trim() || undefined,
                            drafts: $("testDrafts").checked,
@@ -3531,6 +3609,7 @@ $("genPipeGo").addEventListener("click", async () => {
     body: JSON.stringify({
       env: $("testEnv").value || "mock",
       levels: pickedValues("testLevels"),
+      priorities: pickedValues("testPriorities"),
       modules: pickedValues("testModules"),
       only: $("testOnly").value.trim() || undefined,
       kinds: kind ? [kind] : [],

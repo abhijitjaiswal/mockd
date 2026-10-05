@@ -175,6 +175,51 @@ def group_runid():
                t.interpolate("{{$uuid}}", {}) != t.interpolate("{{$uuid}}", {}))
 
 
+def group_record():
+    """A test as something to manage: how much it matters, whether it is in use."""
+    import tests as t
+
+    check("record: priority defaults to the middle", t.priority_of({}), "P2")
+    check("record: and is read case-insensitively", t.priority_of({"priority": "p0"}), "P0")
+    check("record: an unknown priority falls back rather than vanishing",
+          t.priority_of({"priority": "urgent"}), "P2")
+    check("record: status defaults to in use", t.status_of({}), "ready")
+    check("record: links accept a single string", t.links_of({"links": "ABC-1"}), ["ABC-1"])
+    check("record: and drop blanks", t.links_of({"links": ["ABC-1", " ", ""]}), ["ABC-1"])
+
+    base = {"id": "x", "request": {"method": "GET", "path": "/a"},
+            "assertions": [{"type": "status", "equals": 200}]}
+    check("validate: a full record is accepted",
+          t.validate_test({**base, "priority": "P1", "status": "blocked", "owner": "sam",
+                           "links": ["ABC-1"], "description": "reads a thing"}), [])
+    check_true("validate: a made-up priority is refused",
+               any("priority" in e for e in t.validate_test({**base, "priority": "P9"})))
+    check_true("validate: a made-up status is refused",
+               any("status" in e for e in t.validate_test({**base, "status": "paused"})))
+
+    runner = t.Runner.__new__(t.Runner)
+    suite = {"name": "m"}
+    check_true("select: priority narrows a run",
+               runner.selects({**base, "priority": "P0"}, suite, priorities=["P0"])
+               and not runner.selects({**base, "priority": "P3"}, suite, priorities=["P0"]))
+    check_true("select: no priority chosen means every priority",
+               runner.selects({**base, "priority": "P3"}, suite))
+    check_true("select: a retired test never runs, even by name",
+               not runner.selects({**base, "status": "retired"}, suite)
+               and not runner.selects({**base, "status": "retired"}, suite, only="^x"))
+    check_true("select: a blocked test is left out of a general run",
+               not runner.selects({**base, "status": "blocked"}, suite))
+    check_true("select: but runs when asked for by name",
+               runner.selects({**base, "status": "blocked"}, suite, only="^x"))
+
+    counted = t.taxonomy([{"name": "m", "cases": [{**base, "priority": "P0"},
+                                                  {**base, "id": "y"}]}])
+    by_name = {p["name"]: p["tests"] for p in counted["priorities"]}
+    check("taxonomy: priorities are counted", (by_name["P0"], by_name["P2"]), (1, 1))
+    check_true("taxonomy: each says what it means",
+               all(p.get("means") for p in counted["priorities"]))
+
+
 def group_rebind():
     import tests as t
 
@@ -985,6 +1030,7 @@ GROUPS = {
     "readonly": group_readonly,
     "runid": group_runid,
     "rebind": group_rebind,
+    "record": group_record,
     "story": group_story,
     "blueprint": group_blueprint,
     "import": group_import,

@@ -1362,6 +1362,7 @@ def list_tests():
         "path": s.get("_path"), "stage": s.get("_stage", "shared"),
         "data": s.get("data") or {},
         "cases": [{"id": c.get("id"), "name": c.get("name"), "tags": c.get("tags", []),
+                   "levels": t.levels_of(c), **t.record_of(c),
                    "method": (c.get("request") or {}).get("method", "GET"),
                    "path": (c.get("request") or {}).get("path", ""),
                    "assertions": len(c.get("assertions") or []),
@@ -1369,6 +1370,7 @@ def list_tests():
                   for c in (s.get("cases") or [])],
         "scenarios": [{"id": sc.get("id"), "name": sc.get("name"),
                        "kind": sc.get("kind", "api"), "tags": sc.get("tags", []),
+                       "levels": t.levels_of(sc), **t.record_of(sc),
                        "history": hist(s["name"], sc.get("id")),
                        "steps": [{"name": st.get("name"),
                                   "role": st.get("role"),
@@ -1379,6 +1381,56 @@ def list_tests():
                                  for st in (sc.get("steps") or [])]}
                       for sc in (s.get("scenarios") or [])],
     } for s in suites]})
+
+
+@app.post("/api/tests/record")
+def tests_record():
+    """Change how a test is managed — priority, status, owner, links, what it is
+    for — without touching what it does.
+
+    Kept apart from editing steps on purpose: re-prioritising fifty tests before
+    a release should not require opening fifty tests."""
+    import tests as t
+    payload = request.get_json(silent=True) or {}
+    name, ident = payload.get("suite"), payload.get("id")
+    stage = payload.get("stage") or "draft"
+    suites = [su for su in t.load_suites(include_drafts=True)
+              if su.get("name") == name and su.get("_stage", "shared") == stage]
+    if not suites:
+        return jsonify({"ok": False, "error": f"no {stage} suite called {name!r}"}), 200
+    suite = suites[0]
+    _, test = t.find_test(suite, ident)
+    if test is None:
+        return jsonify({"ok": False, "error": f"no test {ident!r} in {name}"}), 200
+
+    fields = payload.get("fields") or {}
+    changed = {}
+    for key in ("priority", "status", "owner", "description", "links", "levels"):
+        if key not in fields:
+            continue
+        value = fields[key]
+        if key == "priority":
+            value = str(value or "").upper()
+        if key == "status":
+            value = str(value or "").lower()
+        if key == "links":
+            value = t.links_of({"links": value if isinstance(value, list)
+                                else re.split(r"[,\s]+", str(value or ""))})
+        if key == "levels":
+            value = [str(x).lower() for x in (value or [])]
+        if value in ("", [], None):
+            test.pop(key, None)
+        else:
+            test[key] = value
+        changed[key] = value
+    kind = "scenario" if "steps" in test else "case"
+    problems = t.validate_test({**test, "data": {**(suite.get("data") or {}),
+                                                 **(test.get("data") or {})}}, kind)
+    if problems:
+        return jsonify({"ok": False, "errors": problems}), 200
+    t.save_suite(suite, stage=stage)
+    return jsonify({"ok": True, "changed": changed, "record": t.record_of(test),
+                    "levels": t.levels_of(test)})
 
 
 @app.post("/api/tests/suggest")
@@ -1989,6 +2041,8 @@ def tests_pipeline():
     payload = request.get_json(silent=True) or {}
     env = (payload.get("env") or "mock").strip()
     levels = [x for x in (payload.get("levels") or []) if x in t.LEVELS]
+    priorities = [str(x).upper() for x in (payload.get("priorities") or [])
+                  if str(x).upper() in t.PRIORITIES]
     modules = [str(x) for x in (payload.get("modules") or []) if str(x).strip()]
     kinds = [x for x in (payload.get("kinds") or []) if x in ("case", "api", "e2e")]
     only = (payload.get("only") or "").strip()
@@ -1997,6 +2051,8 @@ def tests_pipeline():
     flags = [f"--env {shlex.quote(env)}"]
     for level in levels:
         flags.append(f"--level {level}")
+    for priority in priorities:
+        flags.append(f"--priority {priority}")
     for module in modules:
         flags.append(f"--module {shlex.quote(module)}")
     for kind in kinds:
@@ -2012,6 +2068,8 @@ def tests_pipeline():
     command = "python tests.py run " + " ".join(flags)
 
     what = (", ".join(levels) or "every level") + " on " + (", ".join(modules) or "every module")
+    if priorities:
+        what += ", " + "/".join(priorities) + " only"
     if fmt == "command":
         return jsonify({"ok": True, "command": command, "describes": what})
 
@@ -2079,13 +2137,13 @@ jobs:
             if kinds and "case" not in kinds:
                 continue
             if runner.selects(item, suite, only or None, None, levels or None,
-                              modules or None):
+                              modules or None, priorities or None):
                 count += 1
         for item in (suite.get("scenarios") or []):
             if kinds and item.get("kind", "api") not in kinds:
                 continue
             if runner.selects(item, suite, only or None, None, levels or None,
-                              modules or None):
+                              modules or None, priorities or None):
                 count += 1
 
     return jsonify({"ok": True, "yaml": text, "command": command,
@@ -2678,6 +2736,9 @@ def run_tests():
         cmd += ["--tag", tag]
     for level in (payload.get("levels") or []):
         cmd += ["--level", level]
+    for priority in (payload.get("priorities") or []):
+        if str(priority).upper() in ("P0", "P1", "P2", "P3"):
+            cmd += ["--priority", str(priority).upper()]
     for module in (payload.get("modules") or []):
         cmd += ["--module", module]
     if payload.get("verbose"):

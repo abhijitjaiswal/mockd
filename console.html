@@ -362,6 +362,16 @@
             margin-bottom:11px;background:var(--bg)}
   .stepedit h5{margin:0 0 7px;font-size:12px;font-weight:650;display:flex;gap:8px;
                align-items:center}
+  .prio{font-size:10.5px;font-weight:700;padding:1px 6px;border-radius:9px;
+        border:1px solid currentColor;margin-right:5px}
+  .prio.P0{color:var(--err)} .prio.P1{color:#b25e00} .prio.P2{color:var(--muted)}
+  .prio.P3{color:var(--muted);opacity:.7}
+  .recmeta{font-size:11.5px;color:var(--muted);margin-top:2px}
+  .receditor{display:grid;grid-template-columns:repeat(4,minmax(110px,1fr));gap:8px;
+             padding:9px 11px;margin:6px 0 2px 0;border:1px solid var(--line);
+             border-radius:7px;background:var(--panel2,transparent)}
+  .receditor .wide{grid-column:1/-1}
+  .receditor label{font-size:11px;margin:0 0 2px 0}
 </style>
 </head>
 <body>
@@ -845,6 +855,9 @@
             <select id="testEnv"></select>
             <label for="testLevels">How far — pick none for everything</label>
             <select id="testLevels" multiple size="5"
+                    title="hold Cmd or Ctrl to choose several"></select>
+            <label for="testPriorities">How important — pick none for everything</label>
+            <select id="testPriorities" multiple size="4"
                     title="hold Cmd or Ctrl to choose several"></select>
             <label for="testModules">Which modules — none means all</label>
             <select id="testModules" multiple size="4"></select>
