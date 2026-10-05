@@ -270,6 +270,58 @@ def group_references():
                all(v.startswith("<") for v in data.values()) and len(data) == 2, data)
 
 
+def group_bug():
+    """A failure written up so somebody else can act on it without asking."""
+    import tests as t
+
+    item = {"id": "order-create", "name": "An order can be created", "priority": "P1",
+            "links": ["ABC-12"], "description": "Creating an order works.",
+            "outcome": "fail",
+            "verdict": {"headline": "The API contradicted its own spec",
+                        "evidence": ["returned 500"], "next": "provider to fix"},
+            "steps": [
+                {"name": "pick a customer", "outcome": "pass", "status": 200,
+                 "request": {"method": "GET", "url": "http://dev/customers"},
+                 "checks": [{"ok": True, "label": "status is 200"}]},
+                {"name": "create the order", "outcome": "fail", "status": 500,
+                 "request": {"method": "POST", "url": "http://dev/orders",
+                             "headers": {"Cookie": "access_token=SECRET"},
+                             "body": {"customer_id": "c-1", "note": "it's"}},
+                 "checks": [{"ok": False, "label": "status in [200, 201]",
+                             "why": "500 not one of [200, 201]"}],
+                 "response_excerpt": '{"detail":"boom"}'}]}
+    title, text = t.bug_report(item, "orders", {"env": "dev", "base_url": "http://dev",
+                                                "ran_at": "2026-01-01T00:00:00Z"})
+    check_true("bug: the title names the test and the server",
+               "An order can be created" in title and "dev" in title, title)
+    check_true("bug: it states what was expected and what happened",
+               "**Expected:** status in [200, 201]" in text
+               and "**Actual:** 500 not one of [200, 201]" in text, text[:300])
+    check_true("bug: it says whose problem the evidence points at",
+               "The API contradicted its own spec" in text)
+    check_true("bug: every step is listed with how far it got",
+               "pick a customer" in text and "(ok)" in text and "(FAILED)" in text)
+    check_true("bug: the failing request is a curl that can be pasted",
+               "curl -X POST 'http://dev/orders'" in text and '"customer_id": "c-1"' in text)
+    check_true("bug: a quote in the body does not break the command",
+               "it'\\''s" in text, text)
+    check_true("bug: the response is included", '{"detail":"boom"}' in text)
+    check_true("bug: no credential is ever written into it",
+               "SECRET" not in text and "access_token" not in text)
+    check_true("bug: it tells whoever runs it to add their own",
+               "add your own credentials" in text)
+    check_true("bug: the ticket and priority travel with it",
+               "ABC-12" in text and "priority P1" in text)
+
+    lone = {"id": "x", "name": "one call", "outcome": "fail",
+            "steps": [{"name": "call", "outcome": "fail", "status": 404,
+                       "request": {"method": "GET", "url": "http://dev/x"},
+                       "checks": [{"ok": False, "label": "status is 200", "why": "got 404"}]}]}
+    _, short = t.bug_report(lone, "m", {})
+    check_true("bug: a single-call test has no step list to wade through",
+               "**Steps**" not in short and "curl -X GET" in short)
+
+
 def group_baseline():
     """Regenerating must never overwrite somebody's work."""
     import blueprint as b
@@ -1182,6 +1234,7 @@ GROUPS = {
     "rebind": group_rebind,
     "record": group_record,
     "baseline": group_baseline,
+    "bug": group_bug,
     "references": group_references,
     "story": group_story,
     "blueprint": group_blueprint,

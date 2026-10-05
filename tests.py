@@ -2539,6 +2539,96 @@ def rebind_placeholders(test, index, spec=None):
     return changed, notes
 
 
+def _curl(request):
+    """The failing request as something a developer can paste and run.
+
+    No credentials, ever: a bug report is pasted into trackers and chat, and the
+    request recorded here never carried them anyway. Whoever runs it adds their
+    own."""
+    method = str((request or {}).get("method") or "GET").upper()
+    url = str((request or {}).get("url") or "")
+    parts = [f"curl -X {method} '{url}'"]
+    body = (request or {}).get("body")
+    if body not in (None, "", {}):
+        text = body if isinstance(body, str) else json.dumps(body, indent=2)
+        parts.append("  -H 'Content-Type: application/json'")
+        parts.append("  -d '" + text.replace("'", "'\\''") + "'")
+    return " \\\n".join(parts) + "\n# add your own credentials (cookie or token) before running"
+
+
+def bug_report(item, suite_name, meta=None):
+    """A failed test as a report somebody else can act on without asking.
+
+    Writing one by hand is fifteen minutes of copying a request, a response and
+    a guess at whose fault it is out of three different places. Everything it
+    needs is already in the run: what was asked, what came back, what was
+    expected, and — from the verdict — which side the evidence points at.
+    Returns (title, markdown)."""
+    meta = meta or {}
+    where = meta.get("env") or meta.get("base_url") or "the server"
+    name = item.get("name") or item.get("id") or "test"
+    steps = item.get("steps") or []
+    failing = next((st for st in steps if st.get("outcome") not in ("pass", None)
+                    and any(not c.get("ok") for c in (st.get("checks") or []))), None) \
+        or next((st for st in steps if st.get("outcome") not in ("pass", None)), None)
+    broken = [c for c in ((failing or {}).get("checks") or []) if not c.get("ok")]
+
+    head = broken[0] if broken else {}
+    expected = head.get("label") or "the test to pass"
+    happened = head.get("why") or head.get("detail") or (item.get("error") or "it did not")
+    title = f"[{suite_name}] {name} — fails on {where}"
+
+    out = [f"## {title}", ""]
+    if item.get("description"):
+        out += [item["description"], ""]
+    out += [f"**Expected:** {expected}",
+            f"**Actual:** {happened}", ""]
+
+    verdict = item.get("verdict") or {}
+    if verdict.get("headline"):
+        out += [f"**Whose problem this looks like:** {verdict['headline']}"]
+        out += [f"- {line}" for line in (verdict.get("evidence") or [])[:4]]
+        if verdict.get("next"):
+            out += [f"- Suggested next step: {verdict['next']}"]
+        out += [""]
+
+    if len(steps) > 1:
+        out += ["**Steps**"]
+        for number, step in enumerate(steps, 1):
+            request = step.get("request") or {}
+            mark = {"pass": "ok", "blocked": "not reached"}.get(step.get("outcome"),
+                                                               "FAILED")
+            out += [f"{number}. {step.get('name') or ''} — "
+                    f"`{request.get('method', '')} {request.get('url', '')}` → "
+                    f"{step.get('status') or 'no response'} ({mark})"]
+        out += [""]
+
+    if failing:
+        out += ["**Request that failed**", "```bash", _curl(failing.get("request")), "```", ""]
+        out += [f"**Response** (status {failing.get('status') or 'none'})", "```",
+                str(failing.get("response_excerpt") or "(empty)")[:1200], "```", ""]
+        if len(broken) > 1:
+            out += ["**Every check that failed on that step**"]
+            out += [f"- {c.get('label')}" + (f" — {c.get('why')}" if c.get("why") else "")
+                    for c in broken[:8]]
+            out += [""]
+
+    facts = [f"Server: {where}" + (f" ({meta['base_url']})" if meta.get("base_url")
+                                   and meta.get("base_url") != where else ""),
+             f"Test: {suite_name}/{item.get('id')}"
+             + (f", priority {item['priority']}" if item.get("priority") else "")]
+    if item.get("links"):
+        facts.append("Linked: " + ", ".join(item["links"]))
+    spec = meta.get("spec") or {}
+    if spec.get("source") or spec.get("digest"):
+        facts.append(f"API document: {spec.get('source') or ''} "
+                     f"{str(spec.get('digest') or '')[:12]}".strip())
+    if meta.get("ran_at"):
+        facts.append(f"Run at: {meta['ran_at']}")
+    out += ["**Details**"] + [f"- {fact}" for fact in facts]
+    return title, "\n".join(out) + "\n"
+
+
 def id_guidance(unsupplied, index=None):
     """For each id the document cannot explain: a recorded decision, a candidate
     to consider, or an honest nothing.

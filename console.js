@@ -3721,6 +3721,9 @@ function libRender() {
               ${(t.history || {}).last_pass ? "" : "disabled"}
               title="${(t.history || {}).last_pass ? "put it in the shared suite the whole team runs"
                        : "it has to pass once before it can be shared"}">Share with team</button>` : ""}
+          ${out === "fail" ? `<button class="sm" data-libact="bug" data-key="${esc(key)}"
+              title="everything a developer needs to reproduce it, ready to paste into a ticket"
+            >Copy bug report</button>` : ""}
           <button class="sm danger" data-libact="delete" data-key="${esc(key)}">Remove</button>
         </div>
         <div data-libhost="${esc(key)}"></div>
@@ -3761,6 +3764,23 @@ function libRender() {
         return;
       }
       if (b.dataset.libact === "open") { await testAction("open", suite, id, stage); return; }
+      if (b.dataset.libact === "bug") {
+        // A failure written up for somebody else: what was asked, what came
+        // back, whose problem it looks like, and a curl to reproduce it.
+        const q = new URLSearchParams({ suite, id, env: $("libEnv").value || "mock" });
+        const { data } = await api("/api/tests/bug?" + q);
+        if (!data.ok) { banner("err", data.error); return; }
+        copyText(data.markdown, b);
+        const host = $("libList").querySelector(`[data-libhost="${CSS.escape(b.dataset.key)}"]`);
+        if (host) {
+          host.innerHTML = `<p class="hint" style="margin:10px 0 4px 0">Copied — paste it into
+            your tracker. This is what was copied:</p>
+            <pre class="bugtext" style="max-height:260px;overflow:auto"></pre>`;
+          host.querySelector(".bugtext").textContent = data.markdown;
+        }
+        banner("ok", "Bug report copied — paste it into your tracker.");
+        return;
+      }
       if (b.dataset.libact === "delete" && !b.dataset.sure) {
         // one stray click should not cost somebody a test
         b.dataset.sure = "1"; b.textContent = "Really remove?";

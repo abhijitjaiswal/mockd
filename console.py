@@ -1489,6 +1489,43 @@ def list_tests():
     } for s in suites]})
 
 
+@app.get("/api/tests/bug")
+def tests_bug():
+    """The most recent failure of one test, written up for somebody else.
+
+    Looks back through the saved runs rather than taking a job id, so the button
+    works from the list long after the run that failed has scrolled away."""
+    import tests as t
+    suite, ident = request.args.get("suite") or "", request.args.get("id") or ""
+    env = request.args.get("env") or ""
+    runs = sorted(LOG_DIR.glob("run-*.json"), key=lambda f: f.stat().st_mtime,
+                  reverse=True)[:80]
+    passed_since = False
+    for path in runs:
+        try:
+            report = json.loads(path.read_text())
+        except Exception:
+            continue
+        if env and (report.get("env") or report.get("base_url")) != env:
+            continue
+        for block in report.get("suites") or []:
+            if block.get("name") != suite:
+                continue
+            for item in block.get("results") or []:
+                if item.get("id") != ident:
+                    continue
+                if item.get("outcome") == "pass":
+                    passed_since = True
+                    continue
+                title, markdown = t.bug_report(item, suite, report)
+                return jsonify({"ok": True, "title": title, "markdown": markdown,
+                                "ran_at": report.get("ran_at"),
+                                "stale": passed_since})
+    return jsonify({"ok": False, "error":
+                    "No failed run of that test was found"
+                    + (f" on {env}" if env else "") + ". Run it first."}), 200
+
+
 @app.post("/api/tests/record")
 def tests_record():
     """Change how a test is managed — priority, status, owner, links, what it is
