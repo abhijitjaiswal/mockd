@@ -1887,7 +1887,80 @@ def group_access():
     check_true("verdict: and it is said to be open to anyone", "open to anyone" in (found.get("next") or ""))
 
 
+def group_perf():
+    """How fast it answers: noticed from ordinary runs, and measured under load."""
+    import json as _json
+    import tempfile
+    from pathlib import Path
+    import perf
+    from mockd import Spec
+
+    doc = {"openapi": "3.1.0", "info": {"title": "W", "version": "1"}, "paths": {
+        "/widgets": {"get": {"responses": {"200": {"description": "ok"}}}},
+        "/widgets/{widget_id}": {"get": {"responses": {"200": {"description": "ok"}}}},
+        "/reports": {"get": {"responses": {"200": {"description": "ok"}}}}}}
+    spec = Spec(text=_json.dumps(doc), origin="w.json")
+
+    def run(folder, n, server, timings):
+        steps = [{"status": 200, "ms": ms, "request": {"method": "GET", "url": f"http://x{path}"}}
+                 for path, ms in timings]
+        (Path(folder) / f"run-{n:03d}.json").write_text(_json.dumps({
+            "env": server, "suites": [{"name": "s", "results": [{"id": "t", "steps": steps}]}]}))
+        import os
+        os.utime(Path(folder) / f"run-{n:03d}.json", (1000 + n, 1000 + n))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        for n in range(7):                              # steady, then three slow runs
+            run(tmp, n, "dev", [("/widgets", 100 + n), ("/widgets/abc", 40), ("/reports", 1500)])
+        for n in range(7, 10):
+            run(tmp, n, "dev", [("/widgets", 480), ("/widgets/abc", 44), ("/reports", 1600)])
+        run(tmp, 10, "mock", [("/reports", 5000)])
+        run(tmp, 11, "http://localhost:9", [("/reports", 5000)])
+        found = perf.findings(spec, tmp)
+        check("perf: only named real servers are looked at", sorted(found), ["dev"])
+        check("perf: an endpoint that takes over a second is called slow",
+              [(x["operation"], x["ms"]) for x in found["dev"]["slow"]], [("GET /reports", 1600)])
+        slower = found["dev"]["slower"]
+        check("perf: one that became several times slower than itself is noticed",
+              [(x["operation"], x["was"], x["now"]) for x in slower], [("GET /widgets", 103, 480)])
+        check_true("perf: one that stayed the same is not",
+                   not any("widget_id" in x["operation"] for x in slower))
+
+    check("perf: the 95th percentile is the time 95% of calls came in under",
+          perf._percentile(list(range(1, 101)), 0.95), 95)
+    check("perf: with nothing measured it is zero, not an error", perf._percentile([], 0.95), 0)
+
+    suites = [{"name": "m", "_stage": "draft", "data": {}, "cases": [
+        {"id": "reads", "request": {"method": "GET", "path": "/widgets"}, "assertions": []},
+        {"id": "writes", "request": {"method": "POST", "path": "/widgets"}, "assertions": []},
+        {"id": "refuses", "levels": ["negative"], "request": {"method": "GET", "path": "/x"}, "assertions": []},
+        {"id": "nobody", "tags": ["access"], "request": {"method": "GET", "path": "/widgets"}, "assertions": []},
+        {"id": "waits", "data": {"k": "<a real k>"}, "request": {"method": "GET", "path": "/w/{{k}}"}, "assertions": []},
+        {"id": "old", "status": "retired", "request": {"method": "GET", "path": "/widgets"}, "assertions": []}],
+        "scenarios": [
+            {"id": "reads-flow", "steps": [{"request": {"method": "GET", "path": "/widgets"}},
+                                           {"request": {"method": "GET", "path": "/reports"}}]},
+            {"id": "writes-flow", "steps": [{"request": {"method": "GET", "path": "/widgets"}},
+                                            {"request": {"method": "DELETE", "path": "/widgets/1"}}]}]}]
+    check("perf: only tests that just read, are meant to pass and are ready are repeated",
+          sorted(test["id"] for _, test in perf.pick(suites)), ["reads", "reads-flow"])
+    check("perf: a chosen few can be picked out",
+          [test["id"] for _, test in perf.pick(suites, only={"m|draft|reads-flow"})], ["reads-flow"])
+    check_true("perf: tests that write join only when asked",
+               "writes" in [test["id"] for _, test in perf.pick(suites, include_writes=True)])
+
+    result = {"calls": 1200, "seconds": 20.0, "users": 5, "per_second": 60.0, "errors": 0,
+              "p95_budget": 300,
+              "rows": [{"operation": "GET /reports", "p95": 480, "over_budget": True},
+                       {"operation": "GET /widgets", "p95": 90, "over_budget": False}]}
+    said = perf.sentence(result)
+    check_true("perf: the result is one sentence, naming the slowest endpoint and the budget",
+               "1,200 calls in 20 s with 5 at once" in said and "GET /reports, 480 ms for 95% of calls" in said
+               and "1 endpoint is over the 300 ms budget" in said, said)
+
+
 GROUPS = {
+    "perf": group_perf,
     "access": group_access,
     "trackers": group_trackers,
     "observe": group_observe,

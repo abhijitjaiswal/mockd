@@ -3833,6 +3833,70 @@ $("srvAdd").addEventListener("click", () => {
   };
 });
 
+/* ----------------------------------------------------------------- load
+   The tests that only read, repeated with several callers at once for a set
+   time. What comes back is each endpoint's usual time and the time 95% of
+   calls came in under — the number worth watching, because it is the slow
+   calls people notice. */
+let LOAD_TIMER = null;
+
+function loadNote() {
+  const env = $("libEnv").value || "mock";
+  const shown = libFiltered().length, all = libAll().length;
+  $("loadNote").textContent = `Repeats ${shown === all ? "the tests" : `the ${shown} tests shown`} that only read, on `
+    + `${env}. Tests that create or change things are left out.`
+    + (env === "mock" ? "" : ` This puts real load on ${env}.`);
+  $("loadStart").textContent = "Start"; delete $("loadStart").dataset.sure;
+}
+
+$("loadOpen").addEventListener("click", () => {
+  $("loadPanel").hidden = !$("loadPanel").hidden;
+  if (!$("loadPanel").hidden) { loadNote(); loadPoll(); }
+});
+$("loadClose").addEventListener("click", () => { $("loadPanel").hidden = true; });
+$("libEnv").addEventListener("change", () => { if (!$("loadPanel").hidden) loadNote(); });
+
+$("loadStart").addEventListener("click", async () => {
+  const env = $("libEnv").value || "mock";
+  if ($("loadStart").dataset.running) { await api("/api/perf/stop", { method: "POST" }); return; }
+  if (env !== "mock" && !$("loadStart").dataset.sure) {       // one stray click must not load a real server
+    $("loadStart").dataset.sure = "1";
+    $("loadStart").textContent = `Yes, put load on ${env}`;
+    return;
+  }
+  const shown = libFiltered(), all = libAll();
+  const { data } = await api("/api/perf/start", { method: "POST", body: JSON.stringify({
+    env, users: $("loadUsers").value, seconds: $("loadSeconds").value,
+    only: shown.length === all.length ? null : shown.map((t) => `${t.suite}|${t.stage}|${t.id}`) }) });
+  if (!data.ok) { banner("err", data.error || "could not start"); return; }
+  loadPoll();
+});
+
+async function loadPoll() {
+  clearTimeout(LOAD_TIMER);
+  let d;
+  try { ({ data: d } = await api("/api/perf")); } catch { return; }
+  if (d.running) {
+    const pr = d.progress || {};
+    $("loadStart").dataset.running = "1"; $("loadStart").textContent = "Stop";
+    $("loadOut").innerHTML = `<div class="loadbar"><i style="width:${Math.min(100, 100 * (pr.elapsed || 0) / (pr.seconds || 1))}%"></i></div>
+      <div class="hint" style="margin-top:5px" id="loadProgress">${(pr.calls || 0).toLocaleString()} calls so far on ${esc(d.server)}…</div>`;
+    if (!$("loadPanel").hidden) LOAD_TIMER = setTimeout(loadPoll, 700);
+    return;
+  }
+  delete $("loadStart").dataset.running;
+  if ($("loadStart").textContent === "Stop") $("loadStart").textContent = "Start";
+  const r = d.result;
+  if (!r) { $("loadOut").innerHTML = ""; return; }
+  if (!r.ok) { $("loadOut").innerHTML = `<p class="hint" style="color:var(--err)">${esc(r.error)}</p>`; return; }
+  $("loadOut").innerHTML = `<p style="margin:10px 0 0;font-size:13px" id="loadSentence"><b>${esc(r.server)}:</b> ${esc(r.sentence)}</p>
+    <table><tr><th>Endpoint</th><th>Calls</th><th>Usual (ms)</th><th>95% within (ms)</th><th>Slowest (ms)</th><th>Failed</th></tr>
+    ${(r.rows || []).slice(0, 40).map((x) => `<tr><td><code>${esc(x.operation)}</code></td><td>${x.calls.toLocaleString()}</td>
+      <td>${x.median}</td><td class="${x.over_budget ? "over" : ""}">${x.p95}</td><td>${x.slowest}</td>
+      <td class="${x.errors ? "over" : ""}">${x.errors}</td></tr>`).join("")}</table>
+    ${(r.rows || []).length > 40 ? `<p class="hint">…and ${(r.rows || []).length - 40} more endpoints.</p>` : ""}`;
+}
+
 /* ------------------------------------------------------------- trackers
    A bug report that has to be copied into another window is sometimes not
    sent. Connecting the place it goes takes one thing: its address. What it is

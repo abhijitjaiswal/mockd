@@ -367,6 +367,15 @@
             margin-bottom:11px;background:var(--bg)}
   .stepedit h5{margin:0 0 7px;font-size:12px;font-weight:650;display:flex;gap:8px;
                align-items:center}
+  .loadline{display:flex;justify-content:flex-end;margin:-2px 0 6px}
+  .loadpanel{border:1px solid var(--line);border-radius:8px;padding:11px 13px;margin-bottom:10px}
+  .loadpanel table{width:100%;border-collapse:collapse;margin-top:9px;font-size:12.5px}
+  .loadpanel th{text-align:right;font-weight:600;color:var(--muted);padding:4px 8px;font-size:11.5px}
+  .loadpanel th:first-child,.loadpanel td:first-child{text-align:left}
+  .loadpanel td{padding:4px 8px;text-align:right;border-top:1px solid var(--line);font-variant-numeric:tabular-nums}
+  .loadpanel td.over{color:var(--err);font-weight:700}
+  .loadbar{height:6px;border-radius:3px;background:var(--line);overflow:hidden;margin-top:9px}
+  .loadbar i{display:block;height:100%;background:#2f6bff;transition:width .5s linear}
   .watchline{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
   .watchline select{width:auto}
   .watchon{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 12px;
@@ -1005,6 +1014,22 @@
             <select id="libEnv"></select>
             <button class="primary" id="libRun">Run these</button>
           </span>
+        </div>
+        <div class="loadline">
+          <button class="sm" id="loadOpen" title="repeat the tests that only read, with several callers at once, and time them">Run under load…</button>
+        </div>
+        <div id="loadPanel" class="loadpanel" hidden>
+          <div class="watchline">
+            <label for="loadUsers" style="margin:0">Callers at once</label>
+            <input type="number" id="loadUsers" value="5" min="1" max="50" style="width:70px">
+            <label for="loadSeconds" style="margin:0">for</label>
+            <input type="number" id="loadSeconds" value="20" min="1" max="300" style="width:76px">
+            <span class="hint">seconds</span>
+            <button class="primary sm" id="loadStart">Start</button>
+            <button class="sm" id="loadClose">Close</button>
+          </div>
+          <p class="hint" id="loadNote" style="margin:7px 0 0"></p>
+          <div id="loadOut"></div>
         </div>
         <div id="libOnly" class="libonly" hidden></div>
         <div id="libList"></div>

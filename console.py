@@ -616,6 +616,29 @@ def noticed():
                     "detail": seen["sentence"],
                     "action": {"label": "See them", "go": "environments"}})
 
+    # 6. endpoints that are slow, or slower than they themselves used to be —
+    #    read from the timings every run has been recording all along
+    try:
+        import perf
+        speed = perf.findings(load_project_spec())
+    except Exception:
+        speed = {}
+    for env, found in sorted(speed.items()):
+        if found["slower"]:
+            n = len(found["slower"])
+            out.append({"key": f"slower-{env}", "level": "look",
+                        "title": f"{n} endpoint{'s' if n != 1 else ''} on {env} got slower",
+                        "detail": "Compared with how long the same endpoint took in earlier runs.",
+                        "more": [f"{x['operation']}: {x['was']} ms, now {x['now']} ms"
+                                 for x in found["slower"][:6]]})
+        if found["slow"]:
+            n = len(found["slow"])
+            out.append({"key": f"slow-{env}", "level": "look",
+                        "title": f"{n} endpoint{'s' if n != 1 else ''} on {env} usually take"
+                                 f"{'s' if n == 1 else ''} over a second",
+                        "detail": "From the timings of ordinary test runs, not a load test.",
+                        "more": [f"{x['operation']}: about {x['ms']} ms" for x in found["slow"][:6]]})
+
     order = {"act": 0, "look": 1}
     out.sort(key=lambda f: order.get(f["level"], 9))
     return jsonify({"noticed": out})
@@ -2685,6 +2708,67 @@ def tests_value():
 def t_coerce(value):
     """A number typed into a box is a number."""
     return _coerce(value)
+
+
+# ---------------------------------------------------------------------------
+# How fast it answers
+# ---------------------------------------------------------------------------
+PERF = {"thread": None, "stop": None, "progress": None, "result": None, "server": None}
+
+
+@app.get("/api/perf")
+def perf_state():
+    running = PERF["thread"] is not None and PERF["thread"].is_alive()
+    return jsonify({"running": running, "server": PERF["server"],
+                    "progress": PERF["progress"] if running else None,
+                    "result": None if running else PERF["result"]})
+
+
+@app.post("/api/perf/start")
+def perf_start():
+    """Repeat the read-only tests with several callers at once, for a while."""
+    import environments as envmod
+    import perf
+    if PERF["thread"] is not None and PERF["thread"].is_alive():
+        return jsonify({"ok": False, "error": "A load run is already going."}), 200
+    payload = request.get_json(silent=True) or {}
+    server = (payload.get("env") or "mock").strip()
+    if server not in envmod.load():
+        return jsonify({"ok": False, "error": f"There is no server named {server}."}), 200
+    if server == "mock" and not mock.running:
+        return jsonify({"ok": False, "error": "The mock is not running."}), 200
+    try:
+        users = max(1, min(int(payload.get("users") or 5), perf.MAX_USERS))
+        seconds = max(1, min(int(payload.get("seconds") or 20), perf.MAX_SECONDS))
+        budget = int(payload["p95"]) if payload.get("p95") not in (None, "") else None
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Callers, seconds and the budget are whole numbers."}), 200
+    only = set(payload["only"]) if isinstance(payload.get("only"), list) else None
+    stop = threading.Event()
+    PERF.update(stop=stop, result=None, server=server,
+                progress={"calls": 0, "elapsed": 0, "seconds": seconds})
+
+    def work():
+        def progress(calls, elapsed):
+            PERF["progress"] = {"calls": calls, "elapsed": round(elapsed, 1), "seconds": seconds}
+        try:
+            PERF["result"] = perf.load(server, users, seconds, only, False, budget,
+                                       progress=progress, stop=stop)
+        except SystemExit as exc:
+            PERF["result"] = {"ok": False, "error": str(exc)}
+        except Exception as exc:
+            PERF["result"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    PERF["thread"] = threading.Thread(target=work, daemon=True)
+    PERF["thread"].start()
+    return jsonify({"ok": True, "server": server, "users": users, "seconds": seconds})
+
+
+@app.post("/api/perf/stop")
+def perf_stop():
+    if PERF["stop"] is not None:
+        PERF["stop"].set()
+    return jsonify({"ok": True})
 
 
 # ---------------------------------------------------------------------------
