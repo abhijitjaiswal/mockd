@@ -33,8 +33,15 @@ const check = (n, ok, d) => { ok ? pass++ : fail++;
   check("each level says what it means and how many it holds",
         /smoke \(\d+\)/.test(levelText) && /seconds not minutes/.test(levelText),
         levelText.slice(0, 80));
-  check("a level with no tests cannot be chosen",
-        await p.locator("#testLevels option[disabled]").count() >= 1);
+  // Whether any level is empty depends on what tests exist, so asserting that
+  // one IS empty made this fail the day somebody wrote a performance test. The
+  // rule is the thing to check: empty means disabled, non-empty means not.
+  const consistent = await p.evaluate(() =>
+    [...document.querySelectorAll("#testLevels option")].every((o) => {
+      const held = Number((o.textContent.match(/\((\d+)\)/) || [])[1]);
+      return Number.isNaN(held) || (held === 0) === o.disabled;
+    }));
+  check("a level is disabled exactly when it holds no tests", consistent);
 
   // the selection must reach the runner
   await p.locator("#testLevels").selectOption(["smoke"]);

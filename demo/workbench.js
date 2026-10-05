@@ -187,6 +187,56 @@ const NESTED = EP.NESTED;
   check("and the flow itself keeps only its two steps",
         (def.steps || []).length === 2, String((def.steps || []).length));
 
+  // ---- the flow's own data -------------------------------------------------
+  // A value no step produces has to come from somewhere. The workbench used to
+  // drop it on load and never save it, so an imported test that declared `data`
+  // was refused the moment you ran it — while the hint told you to add it to
+  // "the flow's data" with no field to put it in.
+  check("there is somewhere to put a value no step produces",
+        await p.locator("#wbData").isVisible());
+
+  await p.locator("#wbData").fill("levelId=11111111-2222-3333-4444-555555555555");
+  await p.locator("#wbData").dispatchEvent("input");
+  await p.waitForTimeout(400);
+
+  const resolves = await p.evaluate(() => {
+    // a step that uses a name only the flow data supplies
+    const step = { role: "target", name: "uses flow data",
+      request: { method: "POST", path: "/api/v1/widgets",
+                 body: { level_id: "{{levelId}}" } },
+      assertions: [{ type: "status", in: [200, 201, 404, 422] }] };
+    return fetch("/api/tests/chain", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "mock", upto: 0, kind: "e2e", steps: [step],
+                             data: { levelId: "11111111-2222-3333-4444-555555555555" } }),
+    }).then((r) => r.json());
+  });
+  check("a run resolves it instead of refusing the flow",
+        resolves.ok === true && !(resolves.errors || []).length,
+        JSON.stringify(resolves.errors || resolves.error || "").slice(0, 140));
+  check("and the value actually reaches the request",
+        JSON.stringify(resolves.result || {}).includes("11111111-2222"),
+        JSON.stringify(resolves.result || {}).slice(0, 140));
+
+  const kept = await p.evaluate(async (args) => {
+    const flow = { id: args.id + "-data", name: "keeps its data", kind: "e2e",
+      levels: ["smoke"], data: { levelId: "abc-123" },
+      steps: [{ role: "target", name: "s",
+        request: { method: "GET", path: "/api/v1/widgets/{{levelId}}" },
+        assertions: [{ type: "status", in: [200, 404] }] }] };
+    const saved = await (await fetch("/api/tests/save-flow", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ suite: "workbench-probe", stage: "draft", flow }) })).json();
+    const q = new URLSearchParams({ suite: "workbench-probe", id: flow.id, stage: "draft" });
+    const back = await (await fetch("/api/tests/one?" + q)).json();
+    return { saved, test: back.test || back };
+  }, { id });
+  check("saving a flow keeps its data", kept.saved.ok === true,
+        JSON.stringify(kept.saved.errors || "").slice(0, 140));
+  check("and reading it back returns the data it was saved with",
+        (kept.test.data || {}).levelId === "abc-123",
+        JSON.stringify(kept.test.data || {}));
+
   console.log(`\n${pass} passed, ${fail} failed`);
   console.log(errs.length ? "JS ERRORS:\n  " + errs.join("\n  ") : "no JS errors");
   await b.close(); process.exit(fail || errs.length ? 1 : 0);

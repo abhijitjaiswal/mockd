@@ -199,6 +199,14 @@ def _param_schema_types(sch: dict):
     return out
 
 
+def _num(value):
+    """A bound as a number, or an infinity that no comparison can trip."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
 def validate_request(route, path_params):
     """Returns list of error dicts. Empty list = valid."""
     errors = []
@@ -252,6 +260,43 @@ def validate_request(route, path_params):
                 kinds = sorted({b.get("type") for b in typed})
                 errors.append({"in": loc, "field": name,
                                "error": f"expected {'/'.join(kinds)}, got '{value}'"})
+            continue
+
+        # The type was right; the document also states a range. `page: integer,
+        # minimum 1` means page=0 is invalid, and a mock that accepted it was
+        # inventing a laxer API than the one it serves — the kind of difference
+        # a consumer only discovers in production.
+        for b in typed:
+            kind = b.get("type")
+            if kind in ("integer", "number") \
+                    and re.fullmatch(r"-?\d+(\.\d+)?", str(value)):
+                num = float(value)
+                for key, bad, why in (
+                        ("minimum", num < _num(b.get("minimum")), "below the minimum"),
+                        ("maximum", num > _num(b.get("maximum")), "above the maximum"),
+                        ("exclusiveMinimum", num <= _num(b.get("exclusiveMinimum")),
+                         "not above the exclusive minimum"),
+                        ("exclusiveMaximum", num >= _num(b.get("exclusiveMaximum")),
+                         "not below the exclusive maximum")):
+                    if b.get(key) is not None and bad:
+                        errors.append({"in": loc, "field": name,
+                                       "error": f"{value} is {why} {b[key]}"})
+                        break
+                break
+            if kind == "string" and not b.get("enum"):
+                text = str(value)
+                if b.get("minLength") is not None and len(text) < int(b["minLength"]):
+                    errors.append({"in": loc, "field": name,
+                                   "error": f"shorter than the documented minimum "
+                                            f"length {b['minLength']}"})
+                elif b.get("maxLength") is not None and len(text) > int(b["maxLength"]):
+                    errors.append({"in": loc, "field": name,
+                                   "error": f"longer than the documented maximum "
+                                            f"length {b['maxLength']}"})
+                elif b.get("pattern") and not re.search(str(b["pattern"]), text):
+                    errors.append({"in": loc, "field": name,
+                                   "error": f"does not match {b['pattern']}"})
+                break
 
     body_spec = route["request_body"]
     if body_spec:
@@ -356,16 +401,26 @@ def as_documented_validation_error(route, errors):
                 body[key] = violations
                 replaced = True
                 break
-        if replaced:
-            if isinstance(body.get("status_code"), int):
-                body["status_code"] = int(status)
-            if isinstance(body.get("message"), str) and violations:
-                first = violations[0]
-                field = ".".join(str(x) for x in first["loc"][1:]) or "request"
-                body["message"] = f"{field}: {first['msg']}"
+        if isinstance(body.get("status_code"), int):
+            body["status_code"] = int(status)
+        if isinstance(body.get("message"), str) and violations:
+            first = violations[0]
+            field = ".".join(str(x) for x in first["loc"][1:]) or "request"
+            body["message"] = f"{field}: {first['msg']}"
+        if replaced or True:
+            # Even when the documented example carries no list to put the
+            # violations in — this spec has a 422 whose `error` is a plain
+            # string — its STATUS is still the one the document promises.
+            # Falling back to an invented 400 here meant the mock answered with
+            # a status its own document never mentions, which is the single
+            # thing it must not do.
             return int(status), body
 
-    return None
+    # No schema and no example: keep the documented status, describe the
+    # problem in the only shape available.
+    return int(status), {"status_code": int(status),
+                         "message": (violations[0]["msg"] if violations else "invalid"),
+                         "detail": violations}
 
 
 # ----------------------------------------------------------------------------
@@ -1503,8 +1558,21 @@ def build_app(spec_path, stateful=False, log_path=Path("logs/requests.jsonl"),
                 body = synth.wrap_like_spec(
                     route, code, body, store.last_message(route, code),
                     reference=overlay.get(route["key"], code)[1])
-                if request.method == "GET" and not satisfies_contract(route, code, body):
-                    code = None        # stored shape ≠ documented shape; defer
+
+            # The document decides, for every method. Serving a stored object
+            # through an operation that declares a different shape — or a status
+            # the document never mentions — is the mock inventing an API, which
+            # is the one thing it must not do: a test that then fails is failing
+            # against the mock's imagination rather than against the contract.
+            # This check used to run for GET only, so four write operations were
+            # answering with shapes their own schema rejects.
+            if code is not None:
+                documented = {str(k) for k in route["responses"]}
+                if documented and str(code) not in documented \
+                        and "default" not in documented:
+                    code = None                     # undocumented status; defer
+                elif code < 400 and not satisfies_contract(route, code, body):
+                    code = None                     # shape ≠ documented shape
             if code is not None:
                 entry.update(status=code, source="stateful")
                 record(entry)

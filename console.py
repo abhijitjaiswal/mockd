@@ -33,6 +33,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import yaml
 import signal
 import subprocess
@@ -433,15 +434,64 @@ def defaults():
                     "remembered": load_preferences()})
 
 
+SELFCHECK = {"job": None, "started": None, "spec": None}
+
+
+def begin_selfcheck(spec_path):
+    """Ask the mock, the moment it comes up, whether it answers its own spec.
+
+    Everything downstream is built on the assumption that the mock is faithful.
+    When it is not — a stored object served through an operation documenting a
+    different shape, a status the document never mentions — every test written
+    against it is measuring the mock's imagination. That is worth three seconds
+    at startup rather than an afternoon of confusion later."""
+    cmd = [sys.executable, str(HERE / "verify.py"),
+           "--spec", spec_path, "--target", "mock",
+           "--base-url", mock.base_url(), "--allow-writes",
+           "--quiet", "--fail-on", "never",
+           "--report", str(LOG_DIR / "mock-selfcheck.json")]
+    job = start_job(cmd, timeout=300)
+    SELFCHECK.update(job=job, started=time.time(), spec=spec_path)
+    return job
+
+
+@app.get("/api/mock/selfcheck")
+def mock_selfcheck():
+    """How the mock did against its own document, from the run at startup."""
+    job_id = SELFCHECK.get("job")
+    if not job_id:
+        return jsonify({"state": "none"})
+    job = JOBS.get(job_id) or {}
+    if not job.get("done"):
+        return jsonify({"state": "running", "job": job_id})
+    try:
+        report = json.loads((LOG_DIR / "mock-selfcheck.json").read_text())
+    except Exception as exc:
+        return jsonify({"state": "unreadable", "error": str(exc)})
+    summary = report.get("summary") or {}
+    results = report.get("results") or []
+    broken = [r["operation"] for r in results if r.get("level") == "error"]
+    return jsonify({"state": "done", "job": job_id, "spec": SELFCHECK.get("spec"),
+                    "summary": summary, "failed": broken[:20],
+                    "failed_count": len(broken),
+                    "ran_at": report.get("ran_at")})
+
+
 @app.post("/api/start")
 def start():
     options = request.get_json(silent=True) or {}
     if not options.get("spec"):
         return jsonify({"error": "spec is required"}), 400
     ok, message = mock.start(options)
+    job = None
     if ok:
         save_preferences(options)     # only a start that worked becomes the default
-    return jsonify({"ok": ok, "message": message,
+        if options.get("selfcheck") is not False:
+            try:
+                job = begin_selfcheck(project.active_spec(options.get("spec")))
+            except Exception:
+                job = None            # a self-check that cannot start is not a failed start
+    return jsonify({"ok": ok, "message": message, "selfcheck": job,
                     "stdout": tail_log()}), (200 if ok else 500)
 
 
@@ -452,9 +502,27 @@ def stop():
 
 
 def tail_log(lines=200):
+    """The mock's output: how it started, then the most recent traffic.
+
+    The start-up lines say which spec was loaded and how many routes it has, and
+    they are the first thing anyone opens this pane to read. The self-check now
+    sends a request per operation the moment the mock is up, which pushed them
+    out of a plain tail within seconds."""
     if not STDOUT_LOG.exists():
         return ""
-    return "\n".join(STDOUT_LOG.read_text(errors="replace").splitlines()[-lines:])
+    every = STDOUT_LOG.read_text(errors="replace").splitlines()
+    if len(every) <= lines:
+        return "\n".join(every)
+    head = []
+    for line in every[:40]:
+        head.append(line)
+        if "Press CTRL+C" in line:
+            break
+    else:
+        head = every[:12]
+    skipped = len(every) - len(head) - (lines - len(head))
+    return "\n".join(head + [f"  … {skipped} earlier request line(s) not shown …"]
+                     + every[-(lines - len(head)):])
 
 
 @app.get("/api/stdout")
@@ -944,7 +1012,14 @@ def coverage():
     anything."""
     override = request.args.get("spec")
     if mock.running and (not override or override == mock.options.get("spec")):
-        return jsonify(mock_get("/_mock/coverage", timeout=20))
+        # "Running" is true the instant the process exists; it may not be
+        # listening yet. Asked in that gap — a restart on a new spec — this
+        # raised and the page got an HTML 500 it then tried to read as coverage.
+        # Fall through to reading the spec directly, as if the mock were down.
+        try:
+            return jsonify(mock_get("/_mock/coverage", timeout=20))
+        except Exception:
+            pass
     spec_path = override or mock.options.get("spec") or project.active_spec(None, "coverage")
     if not spec_path:
         return jsonify({"error": "no spec"}), 400
@@ -1148,11 +1223,23 @@ def _kill(proc):
 
 @app.get("/api/job/<job_id>/report")
 def job_report(job_id):
-    """The JSON report a finished test run wrote."""
+    """The JSON report THIS run wrote.
+
+    It used to read a single shared last_test_run.json and ignore job_id
+    altogether, so the panel showed whatever had last finished — or, if nothing
+    had, a file left over from another day. That is how running one test came
+    back reporting sixteen, and how a run against dev was read as a run against
+    the mock. Every run already writes run-<id>.json; resolve it and say so
+    plainly when it is not there rather than serving somebody else's results."""
+    name = RUN_REPORTS.get(job_id, job_id)
+    path = LOG_DIR / f"run-{name}.json"
+    if not path.exists():
+        return jsonify({"error": "that run left no report — it may still be "
+                                 "running, or it failed before finishing"}), 404
     try:
-        return jsonify(json.loads((LOG_DIR / "last_test_run.json").read_text()))
+        return jsonify(json.loads(path.read_text()))
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 404
+        return jsonify({"error": f"{path.name} is unreadable: {exc}"}), 404
 
 
 @app.get("/api/job/<job_id>")
@@ -1371,18 +1458,456 @@ def live_samples(spec, routes, limit=6):
     return out
 
 
-@app.post("/api/tests/story")
-def tests_story():
-    """A brief for turning a user story into tests, to paste into an assistant.
+@app.post("/api/tests/blueprint")
+def tests_blueprint():
+    """Lifecycle flows derived from the spec — no model, no story, no typing.
 
-    Deliberately not a call to any model: whatever a team already uses is the
-    one they are allowed to paste into, and the format of what comes back is
-    checked by the same validator either way."""
+    A contract sweep proves each operation answers correctly on its own. It
+    cannot prove that the thing you created can then be read, changed and
+    removed, because that is a sequence, not an operation. This derives those
+    sequences from the shape of the paths, which every spec already carries.
+
+    Preview by default; `import` writes them into the draft workspace, where
+    they are exactly as provisional as anything an assistant produced."""
+    import blueprint as bp
+    payload = request.get_json(silent=True) or {}
+    spec_path = project.active_spec(mock.options.get("spec"))
+    try:
+        from mockd import Source, Spec
+        text, _ = Source(spec_path, poll=0, cache_dir=str(LOG_DIR)).read(force=True)
+        spec = Spec(text=text, origin=spec_path)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"could not read {spec_path}: {exc}"}), 400
+
+    name = (payload.get("suite") or "derived").strip() or "derived"
+    suite, skipped = bp.build(spec, only=(payload.get("only") or None), name=name)
+    flows = suite["scenarios"]
+    summary = [{
+        "id": flow["id"],
+        "name": flow["name"],
+        "steps": [f"{st['request']['method']} {st['request']['path']}"
+                  for st in flow["steps"]],
+        "from": (flow.get("generated") or {}).get("from") or [],
+        "guessed_capture": not (flow.get("generated") or {}).get("capture_from_schema"),
+    } for flow in flows]
+
+    result = {"ok": True, "spec": spec_path, "flows": summary,
+              "skipped": [{"resource": name, "why": why} for name, why in skipped],
+              # a lifecycle reads back what it created; a stateless mock cannot
+              "stateful": bool(mock.options.get("stateful")),
+              "running": bool(mock.running)}
+
+    if payload.get("import"):
+        import tests as t
+        written = t.import_tests(suite, name, stage="draft")
+        if not written.get("ok"):
+            # generated output goes through the same validator as a human's
+            # paste, so a failure here is a real defect, not a formality
+            return jsonify({"ok": False, "error": "generated flows did not validate",
+                            "errors": written.get("errors") or []}), 400
+        result["imported"] = written
+        result["suite"] = name
+    return jsonify(result)
+
+
+# ----------------------------------------------------------------------------
+# Generators: a local assistant, when there is one
+# ----------------------------------------------------------------------------
+
+GENERATED = {}            # job id -> what that generation was for
+
+# Each is run with no tools and a working directory outside this repository.
+# They are being handed a document and asked for JSON; nothing about that needs
+# the ability to read or write files, and an agent loose in the project is a
+# risk with no matching benefit.
+GENERATORS = {
+    "claude": ["claude", "-p", "--output-format", "text", "--allowedTools", ""],
+    "codex": ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only", "-"],
+}
+
+
+def generator_available():
+    return {name: bool(shutil.which(cmd[0])) for name, cmd in GENERATORS.items()}
+
+
+def generator_workdir():
+    path = LOG_DIR / "generator"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def run_generator_now(kind, prompt, timeout=180):
+    """Synchronous, for short prompts — used to sharpen a story, not to write
+    tests. Returns the reply, or None when the tool is missing or fails."""
+    argv = GENERATORS.get(kind)
+    if not argv or not shutil.which(argv[0]):
+        return None
+    try:
+        done = subprocess.run(argv, input=prompt, capture_output=True, text=True,
+                              timeout=timeout, cwd=str(generator_workdir()))
+    except Exception:
+        return None
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
+@app.get("/api/generators")
+def generators():
+    """Which assistants this machine can run, so the UI offers only those."""
+    return jsonify({"available": generator_available(),
+                    "why": "A generator is optional. Without one you get the "
+                           "prompt to paste wherever your team already works."})
+
+
+# Text that is trying to steer the assistant rather than describe a story. This
+# is not a security boundary — the real ones are that the generator runs with no
+# tools, outside this repository, and that whatever comes back must validate as
+# tests before anything is written. It is here so an obvious misuse is refused
+# before it costs a call.
+OFF_TOPIC = re.compile(
+    r"ignore (all |any )?(previous|prior|above)|disregard (the )?(above|previous)"
+    r"|system prompt|you are now|act as|pretend to be"
+    r"|write (me )?an? (poem|song|essay|story about|script|program|blog)"
+    r"|read (the |my )?(file|\.env|secret|credential|password)"
+    r"|exfiltrat|curl |wget |http://|https://|base64|ssh |api[_ ]?key",
+    re.I)
+
+
+def story_out_of_scope(story, spec, matched):
+    """Is this a story about testing THIS API, or something else entirely?
+
+    The grounded half matters more than the keyword half: if nothing in the
+    document matches, there is nothing to generate and no reason to call
+    anything."""
+    if OFF_TOPIC.search(story or ""):
+        return ("that reads as an instruction rather than a user story. This "
+                "generates API tests for the operations in your spec and "
+                "nothing else — describe what someone should be able to do.")
+    if spec is None:
+        return "no spec is loaded, so there is nothing to write tests against."
+    import tests as t
+    if not matched or not t.story_is_about_this_api(spec, story):
+        return ("nothing distinctive in this document matches that story, so "
+                "there is nothing to generate. Use words from your own paths, "
+                "or check the spec under Source is the one you meant.")
+    return None
+
+
+CRITERIA_ASK = (
+    "Below is a user story for API tests. In at most six short bullet points, "
+    "say what the story implies must be TRUE for it to be done — the outcomes "
+    "and edge cases worth asserting.\n"
+    "Rules: describe behaviour only. Do NOT name endpoints, URLs, HTTP methods, "
+    "field names or status codes — those come from the API document, not from "
+    "you, and inventing them is worse than saying nothing. Reply with the "
+    "bullets and nothing else.\n\nSTORY\n"
+)
+
+
+@app.post("/api/tests/generate")
+def tests_generate():
+    """Build the brief and hand it to a local assistant.
+
+    The brief is still built by the engine: every operation, schema, constraint
+    and id in it comes from the document. What an assistant adds is intent —
+    what the story implies — and then the tests themselves, which are validated
+    exactly as a paste is before anything is written."""
     import tests as t
     payload = request.get_json(silent=True) or {}
     story = (payload.get("story") or "").strip()
     if len(story) < 12:
         return jsonify({"ok": False, "error": "give a sentence or two of story"}), 400
+    via = (payload.get("via") or "").strip().lower()
+    if via and via not in GENERATORS:
+        return jsonify({"ok": False, "error": f"no generator called {via!r}"}), 400
+    if via and not shutil.which(GENERATORS[via][0]):
+        return jsonify({"ok": False, "error": f"{via} is not installed"}), 400
+
+    # Refuse before spending a call, and before sending anything anywhere.
+    import tests as t
+    spec = load_project_spec()
+    matched = t.relevant_routes(spec, story) if spec is not None else []
+    refusal = story_out_of_scope(story, spec, matched)
+    if refusal:
+        return jsonify({"ok": False, "error": refusal, "out_of_scope": True}), 200
+
+    criteria = None
+    if payload.get("refine"):
+        criteria = run_generator_now("claude", CRITERIA_ASK + story)
+
+    brief = build_story_brief(story, criteria=criteria)
+    if not via:
+        # no assistant asked for: the prompt is the deliverable, as before
+        return jsonify({"ok": True, "brief": brief, "criteria": criteria,
+                        "refined": bool(criteria), "via": None})
+
+    prompt_file = generator_workdir() / f"prompt-{uuid.uuid4().hex[:8]}.txt"
+    prompt_file.write_text(brief)
+    out_file = prompt_file.with_suffix(".out")
+    argv = GENERATORS[via]
+    if via == "codex":
+        argv = argv + ["-o", str(out_file)]
+    shell = " ".join(shlex.quote(a) for a in argv) + f" < {shlex.quote(str(prompt_file))}"
+    # Generation is a long operation — a couple of minutes is normal and five is
+    # not alarming. The old ten-minute ceiling killed runs that were still going.
+    job = start_job(["/bin/sh", "-c", shell], timeout=1800)
+    GENERATED[job] = {"via": via, "story": story, "brief": brief,
+                      "criteria": criteria,
+                      "out": str(out_file) if via == "codex" else None,
+                      "module": (payload.get("module") or "").strip()}
+    return jsonify({"ok": True, "job": job, "via": via, "criteria": criteria,
+                    "refined": bool(criteria), "brief": brief})
+
+
+def _unique_suite(base):
+    """A name nobody has to invent, and that does not collide with one already
+    on disk — two generations from similar stories must not overwrite."""
+    import tests as t
+    slug = re.sub(r"[^a-z0-9]+", "-", (base or "generated").lower()).strip("-")[:32]
+    slug = slug or "generated"
+    taken = {s.get("name") for s in t.load_suites(include_drafts=True)}
+    if slug not in taken:
+        return slug
+    for _ in range(50):
+        candidate = f"{slug}-{uuid.uuid4().hex[:4]}"
+        if candidate not in taken:
+            return candidate
+    return f"{slug}-{uuid.uuid4().hex[:8]}"
+
+
+def _json_from(reply):
+    """The JSON an assistant meant to send, past whatever it wrapped it in."""
+    text = (reply or "").strip()
+    fenced = re.search(r"```(?:json)?\s*(.+?)```", text, re.S)
+    if fenced:
+        text = fenced.group(1).strip()
+    start = min([i for i in (text.find("["), text.find("{")) if i != -1] or [-1])
+    if start == -1:
+        return None, "the reply contained no JSON"
+    end = max(text.rfind("]"), text.rfind("}"))
+    try:
+        return json.loads(text[start:end + 1]), None
+    except ValueError as exc:
+        return None, f"the reply is not valid JSON: {exc}"
+
+
+@app.post("/api/tests/generate/import")
+def tests_generate_import():
+    """Take what the generator produced and put it through the ordinary door."""
+    import tests as t
+    payload = request.get_json(silent=True) or {}
+    job_id = payload.get("job")
+    meta = GENERATED.get(job_id)
+    job = JOBS.get(job_id)
+    if not meta or not job:
+        return jsonify({"ok": False, "error": "no such generation"}), 404
+    if not job.get("done"):
+        return jsonify({"ok": False, "error": "still generating"}), 409
+
+    reply = ""
+    if meta.get("out") and Path(meta["out"]).exists():
+        reply = Path(meta["out"]).read_text()
+    if not reply.strip():
+        reply = "\n".join(job.get("lines") or [])
+    parsed, problem = _json_from(reply)
+    if problem:
+        return jsonify({"ok": False, "error": problem,
+                        "reply": reply[-4000:]}), 200
+
+    suite_name = (payload.get("module") or meta.get("module")
+                  or _unique_suite(meta.get("story")))
+    written = t.import_tests(parsed, suite_name, stage="draft")
+    if not written.get("ok"):
+        return jsonify({"ok": False, "errors": written.get("errors") or [],
+                        "suite": suite_name, "reply": reply[-4000:]}), 200
+    return jsonify({"ok": True, "suite": suite_name, "file": written.get("file"),
+                    "counted": written.get("counted"), "via": meta.get("via"),
+                    "reply": reply[-4000:]})
+
+
+INDEX_SOURCE = {"env": "mock"}
+
+
+def index_report_path(env):
+    return LOG_DIR / ("mock-selfcheck.json" if env in (None, "", "mock")
+                      else f"index-{re.sub(r'[^A-Za-z0-9_-]', '-', env)}.json")
+
+
+def id_index(env=None):
+    """What every endpoint actually returns, in the environment that matters.
+
+    The mock's self-check is free and runs at startup, so it is the default.
+    But the mock invents a shape wherever the document declares none — its
+    dashboard answers {items: [...]} while the real one answers
+    {held_orders: ...}. An index learned from the mock then sends a test
+    to capture a field that only exists on the mock. Learn it from the server
+    the tests will run against."""
+    try:
+        import bindings
+        path = index_report_path(env or INDEX_SOURCE.get("env"))
+        if not path.exists():
+            path = LOG_DIR / "mock-selfcheck.json"
+        return bindings.index_from_report(json.loads(path.read_text()))
+    except Exception:
+        return {}
+
+
+@app.post("/api/bindings/index")
+def bindings_index():
+    """Sweep an environment read-only and learn what its endpoints return.
+
+    Reads only — no --allow-writes — so this is safe to point at dev or even a
+    read-only staging: it calls the GETs the document declares and records the
+    shape of each reply."""
+    payload = request.get_json(silent=True) or {}
+    env = (payload.get("env") or "mock").strip()
+    spec_path = project.active_spec(mock.options.get("spec"))
+    out = index_report_path(env)
+
+    cmd = [sys.executable, str(HERE / "verify.py"), "--spec", spec_path,
+           "--quiet", "--fail-on", "never", "--report", str(out)]
+    if env in ("mock", ""):
+        if not mock.running:
+            return jsonify({"ok": False, "error": "start the mock first"}), 200
+        cmd += ["--target", "mock", "--base-url", mock.base_url()]
+    else:
+        label, base, auth_headers, problem = resolve_target(env)
+        if problem:
+            return jsonify({"ok": False, "error": problem}), 200
+        cmd += ["--target", "live", "--base-url", base, "--env", env]
+    job = start_job(cmd, timeout=1800)
+    INDEX_SOURCE["pending"] = {"job": job, "env": env}
+    return jsonify({"ok": True, "job": job, "env": env})
+
+
+@app.post("/api/bindings/index/use")
+def bindings_index_use():
+    """Adopt a finished sweep as the source of field names."""
+    payload = request.get_json(silent=True) or {}
+    env = (payload.get("env") or "mock").strip()
+    path = index_report_path(env)
+    if not path.exists():
+        return jsonify({"ok": False,
+                        "error": f"no sweep of {env} yet — learn it first"}), 200
+    INDEX_SOURCE["env"] = env
+    index = id_index(env)
+    return jsonify({"ok": True, "env": env, "fields": len(index)})
+
+
+@app.get("/api/bindings")
+def bindings_list():
+    """Every id the document leaves unexplained, what we know, and what has
+    been decided — the whole question in one place."""
+    import bindings
+    import tests as t
+    spec = load_project_spec()
+    index = id_index()
+    recorded = bindings.load()
+
+    wanted, seen = [], set()
+    for route in (spec.routes if spec is not None else []):
+        content = (route.get("request_body") or {}).get("content") or {}
+        media = content.get("application/json") or (
+            content[sorted(content)[0]] if content else {})
+        for label, field in t._required_ids(t._denull((media or {}).get("schema") or {})):
+            if field in seen:
+                continue
+            seen.add(field)
+            wanted.append({"field": field, "where": label,
+                           "operation": route["key"]})
+
+    out = []
+    for item in wanted:
+        field = item["field"]
+        entry = recorded.get(field)
+        options = bindings.candidates(field, index, limit=3)
+        settled = bool(entry) or (options and options[0]["strength"] in
+                                  (bindings.CERTAIN, bindings.STRONG))
+        out.append({**item, "recorded": entry, "candidates": options,
+                    "settled": bool(settled)})
+    out.sort(key=lambda r: (r["settled"], r["field"]))
+    return jsonify({"ids": out, "indexed_fields": len(index),
+                    "have_index": bool(index),
+                    "learned_from": INDEX_SOURCE.get("env", "mock")})
+
+
+@app.post("/api/tests/rebind")
+def tests_rebind():
+    """Replace placeholder ids in a saved suite with real captures.
+
+    A test written before anything knew where an id came from carries
+    REPLACE_WITH_REAL_... in its data and sends that string to the server. The
+    source is known now, so capture it — no regeneration, and the test keeps
+    working against an environment whose rows are different."""
+    import tests as t
+    payload = request.get_json(silent=True) or {}
+    name = (payload.get("suite") or "").strip()
+    stage = payload.get("stage") or "draft"
+    index = id_index()
+    if not index:
+        return jsonify({"ok": False, "error": "no field index yet — start the mock "
+                                              "so its self-check can run"}), 200
+    suites = [su for su in t.load_suites(include_drafts=True)
+              if su.get("name") == name and su.get("_stage") == stage]
+    if not suites:
+        return jsonify({"ok": False, "error": f"no {stage} suite called {name!r}"}), 200
+    suite = suites[0]
+    notes, touched = [], 0
+    for test in (suite.get("scenarios") or []) + (suite.get("cases") or []):
+        changed, said = t.rebind_placeholders(test, index)
+        notes += [f"{test.get('id')}: {line}" for line in said]
+        touched += 1 if changed else 0
+    problems = [e for test in (suite.get("scenarios") or [])
+                for e in t.validate_test(test, "scenario")]
+    problems += [e for test in (suite.get("cases") or [])
+                 for e in t.validate_test(test, "case")]
+    if problems:
+        return jsonify({"ok": False, "errors": problems, "notes": notes}), 200
+    if payload.get("dry_run"):
+        return jsonify({"ok": True, "changed": touched, "notes": notes,
+                        "written": False})
+    path = t.save_suite(suite, stage=stage)
+    return jsonify({"ok": True, "changed": touched, "notes": notes,
+                    "written": True, "file": str(path)})
+
+
+@app.post("/api/bindings")
+def bindings_save():
+    """Record one decision, so nobody has to make it again."""
+    import bindings
+    payload = request.get_json(silent=True) or {}
+    field = (payload.get("field") or "").strip()
+    if not field:
+        return jsonify({"ok": False, "error": "which id?"}), 400
+    if payload.get("forget"):
+        return jsonify({"ok": True, "ids": bindings.forget(field)})
+    if payload.get("value_required"):
+        entry = {"value_required": True,
+                 "note": (payload.get("note") or "").strip()
+                         or "no endpoint supplies this — give it a real value"}
+    else:
+        if not payload.get("from") or not payload.get("path"):
+            return jsonify({"ok": False,
+                            "error": "give the operation and the json path"}), 400
+        entry = {"from": payload["from"], "path": payload["path"]}
+    entry["decided_on"] = time.strftime("%Y-%m-%d", time.gmtime())
+    return jsonify({"ok": True, "ids": bindings.save(field, entry)})
+
+
+def load_project_spec():
+    """The document this project is about, or None."""
+    try:
+        from mockd import Source, Spec
+        spec_path = project.active_spec(mock.options.get("spec"))
+        text, _ = Source(spec_path, poll=0, cache_dir=str(LOG_DIR)).read(force=True)
+        return Spec(text=text, origin=spec_path) if text else None
+    except Exception:
+        return None
+
+
+def build_story_brief(story, criteria=None):
+    """The brief, built from the document. Shared by the paste-it-yourself path
+    and the run-a-generator path, so both are given exactly the same facts."""
+    import tests as t
     spec_path = project.active_spec(mock.options.get("spec"))
     spec = None
     try:
@@ -1397,12 +1922,35 @@ def tests_story():
     for suite in t.load_suites(include_drafts=True):
         covered += [c.get("id") for c in (suite.get("cases") or [])]
         covered += [sc.get("id") for sc in (suite.get("scenarios") or [])]
-    # sample exactly the operations the brief will name
+    # Sample exactly the operations the brief will name — including the reads it
+    # is about to recommend as id suppliers. Those claims are only worth making
+    # if the response really carries the field, and the mock can say so.
     chosen = t.relevant_routes(spec, story) if spec is not None else []
-    brief = t.story_pack(spec, story, covered, samples=live_samples(spec, chosen))
+    # Sample generously: a candidate trimmed before sampling comes back later as
+    # an unconfirmed guess, which is the thing this is meant to stop.
+    candidates, _ = t.prerequisite_routes(spec, chosen, limit=12) \
+        if spec is not None else ([], [])
+    samples = live_samples(spec, chosen + [route for route, _, _ in candidates],
+                           limit=len(chosen) + len(candidates) + 2)
+    return t.story_pack(spec, story, covered, samples=samples, criteria=criteria,
+                        id_index=id_index())
+
+
+@app.post("/api/tests/story")
+def tests_story():
+    """A brief for turning a user story into tests, to paste into an assistant.
+
+    Calling a model is optional and lives in /api/tests/generate; this one still
+    just hands you the prompt, because whatever a team already uses is the one
+    they are allowed to paste into."""
+    payload = request.get_json(silent=True) or {}
+    story = (payload.get("story") or "").strip()
+    if len(story) < 12:
+        return jsonify({"ok": False, "error": "give a sentence or two of story"}), 400
+    brief = build_story_brief(story)
     matched = brief.count("\n") and "NO OPERATION MATCHED" not in brief
     return jsonify({"ok": True, "brief": brief, "matched": bool(matched),
-                    "spec": spec_path})
+                    "spec": project.active_spec(mock.options.get("spec"))})
 
 
 @app.post("/api/tests/more-like")
@@ -1771,7 +2319,18 @@ def tests_chain():
         return jsonify({"ok": False, "errors": problems}), 200
 
     readonly = _readonly_target(label)
-    runner = t.Runner(base, auth_headers, spec=None, timeout=30,
+    # Give the runner the project's document, so a `schema` assertion in the
+    # workbench checks the body instead of quietly having nothing to check.
+    chain_spec = None
+    try:
+        from mockd import Source, Spec
+        spec_text, _ = Source(project.active_spec(mock.options.get("spec")),
+                              poll=0, cache_dir=str(LOG_DIR)).read(force=True)
+        if spec_text:
+            chain_spec = Spec(text=spec_text)
+    except Exception:
+        chain_spec = None
+    runner = t.Runner(base, auth_headers, spec=chain_spec, timeout=30,
                       readonly=readonly, env_name=label)
     try:
         outcome = runner.run_scenario(scenario, payload.get("data") or {})

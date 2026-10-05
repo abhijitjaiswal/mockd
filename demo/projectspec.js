@@ -9,6 +9,7 @@
 const { chromium } = require("playwright");
 const { execFileSync } = require("child_process");
 const path = require("path");
+const fs = require("fs");
 
 let pass = 0, fail = 0; const errs = [];
 const check = (n, ok, d) => { ok ? pass++ : fail++;
@@ -17,6 +18,22 @@ const check = (n, ok, d) => { ok ? pass++ : fail++;
 const DIR = process.env.MOCKD_DIR || path.resolve(__dirname, "..");
 const cli = (...a) => execFileSync("python3", [path.join(DIR, "project.py"), ...a],
                                    { cwd: DIR, encoding: "utf8" });
+
+// This suite's whole subject is the file that records which document the
+// project is about, so it necessarily writes to it — and it used to leave its
+// own value behind. Whoever ran the suites next found their project quietly
+// pointing at a different spec, with nothing to say why. Snapshot it and put
+// it back, whatever happens.
+const PROJECT_FILE = path.join(DIR, "mockd.json");
+const BEFORE = fs.existsSync(PROJECT_FILE)
+  ? fs.readFileSync(PROJECT_FILE, "utf8") : null;
+const restore = () => {
+  try {
+    if (BEFORE === null) fs.rmSync(PROJECT_FILE, { force: true });
+    else fs.writeFileSync(PROJECT_FILE, BEFORE);
+  } catch { /* nothing to restore */ }
+};
+process.on("exit", restore);
 
 (async () => {
   cli("use", "apis.json");
@@ -45,7 +62,12 @@ const cli = (...a) => execFileSync("python3", [path.join(DIR, "project.py"), ...
   // change it for the whole system
   await p.locator("#projSpec").selectOption("specs/fetched.json");
   await p.locator("#btnProjSave").click();
-  await p.waitForTimeout(1200);
+  // Changing the spec restarts the mock, and how long that takes depends on how
+  // the mock is configured (a stateful one seeds itself first). Wait for the
+  // result rather than for a fixed interval that happened to be enough once.
+  await p.waitForFunction(
+    () => document.querySelector("#projSpecTag").textContent.trim()
+          === "specs/fetched.json", null, { timeout: 15000 }).catch(() => {});
   check("choosing one sets it everywhere",
         (await p.locator("#projSpecTag").textContent()).trim() === "specs/fetched.json");
   check("and says to commit the decision",
@@ -100,7 +122,7 @@ const cli = (...a) => execFileSync("python3", [path.join(DIR, "project.py"), ...
         /Everything follows the project spec/.test(
           await p.locator("#projModules").textContent()));
 
-  cli("use", "apis.json");
+  restore();
   console.log(`\n${pass} passed, ${fail} failed`);
   console.log(errs.length ? "JS ERRORS:\n  " + errs.join("\n  ") : "no JS errors");
   await b.close(); process.exit(fail || errs.length ? 1 : 0);

@@ -44,3 +44,6 @@ tests/*.json
 # --- local overrides: your API's shape, never the tool's ------------------
 conventions.local.json
 demo/endpoints.local.js
+
+# --- decided for your API, not for the tool ----------------------------------
+bindings.json

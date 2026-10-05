@@ -112,6 +112,41 @@ const check = (n, ok, d) => { ok ? pass++ : fail++;
     }
   });
 
+  // ---- the label filter ----------------------------------------------------
+  // It used to reassign a `const`, which threw before the tree was redrawn: the
+  // chip lit up and the list stayed exactly as it was, so the filter looked
+  // inert rather than broken.
+  const rows = () => p.locator("#testTree [data-id]").count();
+  const chips = await p.locator("#tagFilter .chip").count();
+  if (chips > 1) {
+    // take the baseline from a redraw, not from whatever the page happened to
+    // be showing, so expansion state is the same on both sides of the compare
+    await p.locator('#tagFilter .chip[data-tag=""]').click();
+    await p.waitForTimeout(600);
+    const before = await rows();
+    let narrowed = -1, label = "";
+    for (let i = 1; i < chips; i++) {
+      const chip = p.locator("#tagFilter .chip").nth(i);
+      label = (await chip.textContent()).trim();
+      await chip.click();
+      await p.waitForTimeout(600);
+      narrowed = await rows();
+      if (narrowed !== before) break;
+    }
+    check("choosing a label actually narrows the list",
+          narrowed >= 0 && narrowed < before,
+          `${label}: ${before} -> ${narrowed}`);
+    check("and the chosen chip is the one marked on",
+          (await p.locator("#tagFilter .chip.on").textContent()).trim() === label,
+          label);
+
+    await p.locator('#tagFilter .chip[data-tag=""]').click();
+    await p.waitForTimeout(600);
+    const restored = await rows();
+    check("and 'all' puts everything back", restored === before,
+          `${restored} vs ${before}`);
+  }
+
   console.log(`\n${pass} passed, ${fail} failed`);
   console.log(errs.length ? "JS ERRORS:\n  " + errs.join("\n  ") : "no JS errors");
   await b.close(); process.exit(fail || errs.length ? 1 : 0);

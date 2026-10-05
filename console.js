@@ -28,7 +28,8 @@ function showView(name) {
     a.classList.toggle("on", a.dataset.view === name));
   location.hash = name;
   window.scrollTo(0, 0);
-  if (name === "tests") { loadTests(); fillTestSelectors(); fillTypeList(); }
+  if (name === "tests") { loadTests(); fillTestSelectors(); fillTypeList();
+                         loadBindings(); fillBindSuites(); }
   if (name === "source") loadProjectSpec();
   if (name === "explore" && !ROUTES.length && RUNNING) loadRoutes();
   if (name === "authoring" && !GUIDE) { loadRules(); loadGuide(); }
@@ -65,6 +66,36 @@ function options() {
   return o;
 }
 
+/* Everything downstream assumes the mock is faithful to the document. When it
+   is not, every test written against it measures the mock's imagination, so the
+   answer belongs next to "running" rather than somewhere you have to go look. */
+async function watchSelfcheck() {
+  const el = $("selfcheck");
+  el.hidden = false;
+  el.className = "tag";
+  el.textContent = "checking the mock against its spec…";
+  for (let i = 0; i < 90; i++) {
+    let d;
+    try { ({ data: d } = await api("/api/mock/selfcheck")); } catch { return; }
+    if (d.state === "done") {
+      const s = d.summary || {};
+      const failed = d.failed_count || 0;
+      el.className = "tag " + (failed ? "err" : "ok");
+      el.textContent = failed
+        ? `${failed} operation(s) do not match the spec`
+        : `${s.ok || 0} verified against the spec`;
+      el.title = failed
+        ? "The mock contradicts its own document: " + (d.failed || []).join(", ")
+        : `${s.ok || 0} verified, ${s.warning || 0} unverifiable (the spec `
+          + `declares no response schema for those)`;
+      return;
+    }
+    if (d.state && d.state !== "running") { el.hidden = true; return; }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  el.hidden = true;
+}
+
 function setRunning(on, baseUrl) {
   RUNNING = on;
   TARGET_BASE.mock = baseUrl || "";
@@ -75,6 +106,7 @@ function setRunning(on, baseUrl) {
   $("btnRestart").disabled = !on;
   $("btnStart").disabled = on;
   $("btnSend").disabled = false;   // a real environment works without the mock
+  if (!on) $("selfcheck").hidden = true;
 }
 
 async function refreshState() {
@@ -98,6 +130,7 @@ async function start() {
     return;
   }
   banner("ok", "Mock server started.");
+  watchSelfcheck();
   await refreshState();
   await loadCoverage();
   await loadRules();
@@ -670,13 +703,16 @@ const PHASE = /^\s*(phase \d.*|SUITE .*|={10,})\s*$/;
 const STARTED = /^\s*\.\.\.\.\s+(.+)$/;
 const SKIPPED = /^\s*SKIP\s+(\S+ \S+)\s{2,}(.*)$/;
 const TOTAL = /^\s*running now: (\d+)/;
+// "48 / 48" with nothing else said reads as full coverage. It is not: the
+// writes and anything deselected never produce a result line at all.
+const NOTRUN = /^\s*(\d+) not run\s*$/;
 
 const CLASS = { PASS: "pass", FAIL: "fail", ERR: "fail", WARN: "warn",
                 BLOCK: "block", SKIP: "warn" };
 
 function renderRun(text, rowsEl, progressEl, finished) {
   const rows = [];
-  let done = 0, expected = 0;
+  let done = 0, expected = 0, notRun = 0;
   const inflight = new Map();          // started but not yet reported
   let announced = false;               // the run states its own total up front
   for (const line of (text || "").split("\n")) {
@@ -690,8 +726,11 @@ function renderRun(text, rowsEl, progressEl, finished) {
       if (n && !announced) expected += Number(n[1]);
       continue;
     }
+    const nr = line.match(NOTRUN);
+    if (nr) { notRun = Math.max(notRun, Number(nr[1])); continue; }
+
     let m = line.match(SKIPPED);
-    if (m) { rows.push(row("SKIP", "", "", m[1], m[2])); continue; }
+    if (m) { notRun++; rows.push(row("SKIP", "", "", m[1], m[2])); continue; }
 
     m = line.match(STARTED);
     if (m) { inflight.set(m[1].trim(), rows.length); rows.push(null); continue; }
@@ -733,7 +772,9 @@ function renderRun(text, rowsEl, progressEl, finished) {
   rowsEl.scrollTop = rowsEl.scrollHeight;
   if (progressEl) {
     const waiting = inflight.size && !finished ? `  ·  ${inflight.size} in flight` : "";
-    progressEl.textContent = (expected ? `${done} / ${expected}` : `${done} done`) + waiting;
+    const held = notRun ? `  ·  ${notRun} not run` : "";
+    progressEl.textContent = (expected ? `${done} / ${expected}` : `${done} done`)
+                             + held + waiting;
   }
 }
 
@@ -806,7 +847,9 @@ let SUGGESTED = null;
 
 async function loadTests() {
   const { data } = await api("/api/tests");
-  const suites = data.suites || [];
+  // reassigned below when a label is selected — `const` here threw on every
+  // click, which aborted the redraw and made the filter look like it did nothing
+  let suites = data.suites || [];
   const total = suites.reduce((n, s) => n + s.cases.length + s.scenarios.length, 0);
   $("testCount").textContent = total ? `${total} in ${suites.length} section(s)` : "none yet";
   $("navTests").textContent = total || "";
@@ -1123,6 +1166,10 @@ async function wbLoad(suite, id, stage) {
     }
   }
 
+  // a flow may declare values no step produces; keep them, or running the
+  // test you just opened fails on a variable it was imported with
+  WB.data = test.data || {};
+  wbDataToText(WB.data);
   const steps = (test.steps || [test]).map((step) => ({
     role: step.role || (test.steps ? "step" : "target"),
     name: step.name || "",
@@ -2027,7 +2074,7 @@ $("btnCompare").addEventListener("click", runCompare);
    response said `data.id` and type it correctly. So: run a step, look at what
    actually came back, click the value, and the binding writes itself. */
 
-let WB = { steps: [], ran: {}, loadedFrom: null, touched: false };
+let WB = { steps: [], ran: {}, loadedFrom: null, touched: false, data: {} };
 
 function wbBlankStep(role) {
   // A lone step is the thing being tested, not scaffolding for it. Defaulting
@@ -2128,9 +2175,36 @@ function renderDynamicChips() {
   });
 }
 
+/* A flow may carry values no step produces — an id the document cannot supply.
+   The workbench dropped them silently on load and never saved them, so an
+   imported test that declared `data` was refused the moment you ran it, while
+   the hint told you to "add it to the flow's data" with nowhere to do so. */
+function wbDataFromText() {
+  const out = {};
+  for (const line of ($("wbData").value || "").split("\n")) {
+    const text = line.split("#")[0].trim();
+    if (!text) continue;
+    const at = text.indexOf("=");
+    if (at < 1) continue;
+    out[text.slice(0, at).trim()] = text.slice(at + 1).trim();
+  }
+  return out;
+}
+
+function wbDataToText(data) {
+  $("wbData").value = Object.entries(data || {})
+    .map(([k, v]) => `${k}=${v}`).join("\n");
+}
+
+/* Names the flow supplies itself, and the side effect of keeping WB.data current. */
+function wbScope() {
+  WB.data = wbDataFromText();
+  return Object.keys(WB.data);
+}
+
 function wbRender() {
   if (!WB.steps.length) WB.steps.push(wbBlankStep());
-  const produced = [];                       // what is in scope by each step
+  const produced = [wbScope()];                       // what is in scope by each step
   $("wbSteps").innerHTML = WB.steps.map((step, i) => {
     const ran = WB.ran[i];
     const consumes = wbVariablesUsed(step);
@@ -2320,8 +2394,8 @@ function wbRefreshWire(index) {
   const host = $("wbSteps").querySelector(`.wbstep[data-i="${index}"] .wbwire`);
   if (!host) return;
   const step = WB.steps[index];
-  const known = new Set(WB.steps.slice(0, index)
-    .flatMap((s) => Object.keys(s.capture || {})));
+  const known = new Set([...wbScope(), ...WB.steps.slice(0, index)
+    .flatMap((s) => Object.keys(s.capture || {}))]);
   const consumes = wbVariablesUsed(step);
   const missing = consumes.filter((v) => !known.has(v));
   const outs = Object.keys(step.capture || {});
@@ -2520,6 +2594,7 @@ async function wbRun(upto) {
       method: "POST",
       body: JSON.stringify({ target: $("wbEnv").value || "mock", upto,
                              kind: $("wbKind").value, steps,
+                             data: wbDataFromText(),
                              ...(faithful ? { record: WB.loadedFrom } : {}) }),
     });
     if (data.error) { banner("err", data.error); return; }
@@ -2557,6 +2632,8 @@ async function wbSave() {
     cleanup: all.filter((s) => s.role === "cleanup"),
   };
   if (!scenario.cleanup.length) delete scenario.cleanup;
+  const flowData = wbDataFromText();
+  if (Object.keys(flowData).length) scenario.data = flowData;
   const { data } = await api("/api/tests/save-flow", {
     method: "POST",
     body: JSON.stringify({ suite: module, stage: "draft", flow: scenario }),
@@ -3129,7 +3206,7 @@ $("exploreTarget").addEventListener("change", () => {
   offerConfigure($("exploreTarget").value, "to explore against");
 });
 $("btnSaveTest").addEventListener("click", openSaveDialog);
-$("btnTestsRefresh").addEventListener("click", loadTests);
+$("btnTestsRefresh").addEventListener("click", () => { loadTests(); loadBindings(); });
 $("btnRunTests").addEventListener("click", () =>
   runTests($("testKind").value ? [$("testKind").value] : []));
 $("btnRunSanity").addEventListener("click", () => runTests(["e2e"]));
@@ -3141,14 +3218,32 @@ function genOpen(kind) {
   $("genCard").hidden = false;
   $("genStoryRow").hidden = kind !== "story";
   $("genPipeRow").hidden = kind !== "pipeline";
+  $("genLifeRow").hidden = kind !== "lifecycle";
   $("genOut").textContent = "";
-  if (kind === "story") {
+  if (kind === "lifecycle") {
+    $("genTitle").textContent = "Lifecycles derived from the spec";
+    $("genNote").textContent =
+      "No model and no story. A contract sweep proves each operation answers "
+      + "correctly on its own; it cannot prove the thing you created can then be "
+      + "read, changed and removed, because that is a sequence. These are derived "
+      + "from the shape of your paths, so they work on any spec.";
+    $("genLifeOut").innerHTML = "";
+    $("genLifeNote").textContent = "";
+    $("genLifeImport").disabled = true;
+  } else if (kind === "story") {
     $("genTitle").textContent = "Tests from a user story";
     $("genNote").textContent =
       "This builds a brief: the story, the operations from your spec that look "
       + "relevant, the house format, and what is already covered. It calls no model "
       + "— paste it wherever your team already works.";
     $("genStory").focus();
+    if ($("genVia")) {
+      const label = () => ($("genVia").value
+        ? `Generate with ${$("genVia").value} and import`
+        : "Build the brief");
+      $("genStoryGo").textContent = label();
+      $("genVia").onchange = () => { $("genStoryGo").textContent = label(); };
+    }
   } else {
     $("genTitle").textContent = "Pipeline for this selection";
     $("genNote").textContent =
@@ -3159,6 +3254,273 @@ function genOpen(kind) {
 
 $("btnPipeline").addEventListener("click", () => genOpen("pipeline"));
 $("btnStory").addEventListener("click", () => genOpen("story"));
+
+/* Only offer what this machine can actually run. A generator is a convenience;
+   without one the prompt is still the deliverable, exactly as before. */
+let GENERATORS = {};
+async function loadGenerators() {
+  try {
+    const { data } = await api("/api/generators");
+    GENERATORS = data.available || {};
+  } catch { GENERATORS = {}; }
+  const sel = $("genVia");
+  if (!sel) return;
+  const names = Object.keys(GENERATORS).filter((k) => GENERATORS[k]);
+  sel.innerHTML = '<option value="">nobody — just give me the prompt</option>'
+    + names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
+  $("genRefine").disabled = !GENERATORS.claude;
+}
+loadGenerators();
+
+/* Generate and import in one go. What comes back is validated exactly as a
+   paste is — a generator is a faster way to reach the same door, not a way
+   around it — and it lands in drafts, where it still has to pass. */
+async function generateWith(via) {
+  const story = $("genStory").value.trim();
+  const module = $("genModule").value.trim();
+  $("genStoryGo").disabled = true;
+  $("genOut").textContent = via
+    ? `asking ${via} for tests — this takes a moment…`
+    : "building the brief…";
+  try {
+    const { data } = await api("/api/tests/generate", {
+      method: "POST",
+      body: JSON.stringify({ story, via, module, refine: $("genRefine").checked }),
+    });
+    if (!data.ok) { banner("err", data.error || "could not generate");
+                    $("genOut").textContent = data.error || ""; return; }
+    if (data.criteria) {
+      $("genNote").textContent = "What the story implies: " + data.criteria;
+    }
+    if (!via) { $("genOut").textContent = data.brief || ""; return; }
+
+    const briefShown = data.brief || "";
+    $("genOut").textContent = briefShown;
+
+    // Wait for the generator to actually finish. followJob wants DOM nodes to
+    // stream into; handing it nulls threw, the throw was swallowed, and the
+    // import ran instantly against a job that had not started producing yet —
+    // which is what "still generating" was telling us.
+    const started = Date.now();
+    let finished = false;
+    for (let i = 0; i < 1200; i++) {
+      let status;
+      try { ({ data: status } = await api(`/api/job/${data.job}`)); }
+      catch { break; }
+      if (status && status.done) { finished = true; break; }
+      const secs = Math.round((Date.now() - started) / 1000);
+      $("genOut").textContent =
+        `${via} is writing the tests — ${secs}s`
+        + ` (two to five minutes is normal; Cancel is in the toolbar)\n\n`
+        + ((status && status.output) || "").slice(-2000);
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    if (!finished) {
+      banner("err", `${via} did not finish in 30 minutes. The prompt is in the `
+                    + `box above — copy it and paste it wherever you like.`);
+      $("genOut").textContent = briefShown;
+      return;
+    }
+
+    const { data: got } = await api("/api/tests/generate/import", {
+      method: "POST", body: JSON.stringify({ job: data.job, module }) });
+    if (!got.ok) {
+      banner("err", (got.errors || [got.error || "refused"]).join("  ·  "));
+      $("genOut").textContent = (got.reply || "")
+        + "\n\n--- refused ---\n" + (got.errors || [got.error]).join("\n");
+      return;
+    }
+    banner("ok", `${via} wrote tests into ${got.suite} — they are drafts until they pass.`);
+    $("genOut").textContent = got.reply || "";
+    await loadTests();
+  } finally { $("genStoryGo").disabled = false; }
+}
+$("btnLifecycle").addEventListener("click", () => genOpen("lifecycle"));
+
+/* The ids a document cannot explain, and what we know about each. Unsettled
+   first — those are the ones that end up as a placeholder in somebody's test
+   and then as "invalid or no longer available" from a real server. */
+async function loadBindings() {
+  let d;
+  try { ({ data: d } = await api("/api/bindings")); } catch { return; }
+  const ids = d.ids || [];
+  const open = ids.filter((r) => !r.settled).length;
+  $("bindCount").textContent = ids.length
+    ? `${ids.length - open} of ${ids.length} placed` : "none needed";
+  $("bindLearned").className = "tag " + (d.learned_from === "mock" ? "warn" : "ok");
+  $("bindLearned").textContent = `names from ${d.learned_from || "mock"}`;
+  fillBindEnvs(d.learned_from);
+  $("bindCount").className = "tag " + (open ? "warn" : "ok");
+  if (!d.have_index) {
+    $("bindList").innerHTML = '<div class="empty">Start the mock — the self-check '
+      + 'it runs is what tells us which endpoint returns what.</div>';
+    return;
+  }
+  $("bindList").innerHTML = ids.map((r) => {
+    const rec = r.recorded;
+    const best = (r.candidates || [])[0];
+    const where = rec && rec.path ? `${esc(rec.path)} from ${esc(rec.from)}`
+      : rec && rec.value_required ? "you supply a real value"
+      : best ? `${esc(best.path)} from ${esc(best.operation)}` : "";
+    const mark = rec ? "recorded" : (best ? best.strength : "nothing");
+    const cls = rec ? "pass" : (best && best.strength !== "weak" ? "pass" : "warn");
+    return `<div class="runrow ${cls}" data-bind="${esc(r.field)}">
+      <span class="v">${esc(mark)}</span>
+      <span class="what" title="${esc(r.where)} on ${esc(r.operation)}">
+        <code>${esc(r.field)}</code></span>
+      <span class="why2">${where || "no field in any response looks like it"}</span>
+    </div>
+    <div class="bindopts" data-opts="${esc(r.field)}" style="margin:0 0 9px 26px">
+      ${(r.candidates || []).map((c) => `
+        <button class="sm" data-use="${esc(r.field)}"
+          data-from="${esc(c.operation)}" data-path="${esc(c.path)}"
+          title="${esc(c.why)}">use ${esc(c.path)}${c.needs_id ? " ⚠" : ""}</button>`).join("")}
+      <button class="sm" data-manual="${esc(r.field)}">I supply this value</button>
+      ${rec ? `<button class="sm danger" data-forget="${esc(r.field)}">forget</button>` : ""}
+      ${(r.candidates || []).some((c) => c.needs_id)
+        ? '<span class="hint">⚠ that read needs an id of its own first</span>' : ""}
+    </div>`;
+  }).join("");
+
+  const post = async (body) => {
+    const { data } = await api("/api/bindings",
+      { method: "POST", body: JSON.stringify(body) });
+    if (!data.ok) { banner("err", data.error || "could not record"); return; }
+    banner("ok", `Recorded where ${body.field} comes from.`);
+    await loadBindings();
+  };
+  $("bindList").querySelectorAll("[data-use]").forEach((b) =>
+    b.addEventListener("click", () => post({ field: b.dataset.use,
+      from: b.dataset.from, path: b.dataset.path })));
+  $("bindList").querySelectorAll("[data-manual]").forEach((b) =>
+    b.addEventListener("click", () => post({ field: b.dataset.manual,
+      value_required: true })));
+  $("bindList").querySelectorAll("[data-forget]").forEach((b) =>
+    b.addEventListener("click", () => post({ field: b.dataset.forget, forget: true })));
+}
+$("bindRefresh").addEventListener("click", loadBindings);
+
+/* Fix a suite in place rather than regenerating it: the tests somebody already
+   reviewed keep their shape, and only the placeholder ids change. */
+async function fillBindEnvs(current) {
+  const names = (ENVS || []).map((e) => e.name);
+  $("bindEnv").innerHTML = (names.length ? names : ["mock"])
+    .map((n) => `<option value="${esc(n)}"${n === current ? " selected" : ""}>`
+                + `${esc(n)}</option>`).join("");
+}
+
+$("bindLearn").addEventListener("click", async () => {
+  const env = $("bindEnv").value || "mock";
+  $("bindLearn").disabled = true;
+  $("bindLearned").className = "tag";
+  $("bindLearned").textContent = `sweeping ${env}…`;
+  try {
+    const { data } = await api("/api/bindings/index",
+      { method: "POST", body: JSON.stringify({ env }) });
+    if (!data.ok) { banner("err", data.error); $("bindLearned").textContent = ""; return; }
+    for (let i = 0; i < 900; i++) {
+      let status;
+      try { ({ data: status } = await api(`/api/job/${data.job}`)); } catch { break; }
+      if (status && status.done) break;
+      $("bindLearned").textContent = `sweeping ${env} — ${status.seconds || 0}s`;
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    const { data: used } = await api("/api/bindings/index/use",
+      { method: "POST", body: JSON.stringify({ env }) });
+    if (!used.ok) { banner("err", used.error); return; }
+    banner("ok", `Field names now come from ${env} — ${used.fields} field(s).`);
+    await loadBindings();
+  } finally { $("bindLearn").disabled = false; }
+});
+
+async function fillBindSuites() {
+  try {
+    const { data } = await api("/api/tests");
+    const names = (data.suites || []).map((s) => s.name);
+    $("bindSuite").innerHTML = [...new Set(names)]
+      .map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
+  } catch { /* the picker is a convenience */ }
+}
+
+$("bindFix").addEventListener("click", async () => {
+  const suite = $("bindSuite").value;
+  if (!suite) { banner("err", "Pick a suite."); return; }
+  $("bindFix").disabled = true;
+  try {
+    const { data } = await api("/api/tests/rebind", {
+      method: "POST", body: JSON.stringify({ suite, stage: "draft" }) });
+    if (!data.ok) {
+      banner("err", (data.errors || [data.error]).join("  ·  "));
+      $("bindFixNote").textContent = (data.notes || []).join("\n")
+        || data.error || "refused";
+      return;
+    }
+    $("bindFixNote").textContent = data.changed
+      ? (data.notes || []).join("\n")
+      : `Nothing to fix in ${suite} — no placeholder ids left.`;
+    banner(data.changed ? "ok" : "ok",
+           data.changed ? `Rewrote ${data.changed} test(s) in ${suite}.`
+                        : `${suite} has no placeholder ids.`);
+    await loadTests();
+  } finally { $("bindFix").disabled = false; }
+});
+
+/* Derived flows read back what they create, so a stateless mock cannot pass
+   them — saying that here is cheaper than letting someone debug it. */
+function renderLifecycles(d) {
+  const flows = d.flows || [];
+  if (!flows.length) {
+    $("genLifeOut").innerHTML =
+      '<div class="empty">No lifecycle could be derived from this spec — a resource '
+      + 'needs a create plus a way to read, change or remove what it creates.</div>';
+    return;
+  }
+  $("genLifeOut").innerHTML = flows.map((f) => `
+    <div class="runrow ${f.guessed_capture ? "warn" : "pass"}">
+      <span class="v">${f.steps.length}</span>
+      <span class="what" title="${esc(f.name)}"><code>${esc(f.id)}</code></span>
+      <span class="why2">${esc(f.steps.join("  \u2192  "))}</span>
+    </div>`).join("")
+    + (d.skipped || []).map((s) => `
+    <div class="runrow"><span class="v">\u2014</span>
+      <span class="what"><code>${esc(s.resource)}</code></span>
+      <span class="why2">${esc(s.why)}</span></div>`).join("");
+  const guessed = flows.filter((f) => f.guessed_capture).length;
+  const parts = [`${flows.length} flow${flows.length === 1 ? "" : "s"} from `
+                 + `${d.spec || "the project spec"}`];
+  if (guessed) parts.push(`${guessed} take the id by house convention — the document `
+                          + `declares none`);
+  if (d.running && !d.stateful) parts.push("the mock is running stateless, so these "
+                                           + "cannot pass against it — restart it "
+                                           + "stateful under Source");
+  $("genLifeNote").textContent = parts.join("  \u00b7  ");
+}
+
+$("genLifeGo").addEventListener("click", async () => {
+  $("genLifeGo").disabled = true;
+  $("genLifeNote").textContent = "reading the spec…";
+  try {
+    const { data } = await api("/api/tests/blueprint", {
+      method: "POST", body: JSON.stringify({}) });
+    if (!data.ok) { banner("err", data.error || "could not derive"); return; }
+    renderLifecycles(data);
+    $("genLifeImport").disabled = !(data.flows || []).length;
+  } finally { $("genLifeGo").disabled = false; }
+});
+
+$("genLifeImport").addEventListener("click", async () => {
+  $("genLifeImport").disabled = true;
+  try {
+    const { data } = await api("/api/tests/blueprint", {
+      method: "POST", body: JSON.stringify({ import: true }) });
+    if (!data.ok) {
+      banner("err", (data.errors || [data.error || "import failed"]).join("  ·  "));
+      return;
+    }
+    banner("ok", `added to drafts as ${data.suite} — run them, then promote what passes`);
+    await loadTests();
+  } finally { $("genLifeImport").disabled = false; }
+});
 $("genClose").addEventListener("click", () => { $("genCard").hidden = true; });
 $("genCopy").addEventListener("click", () => copyText($("genOut").textContent, $("genCopy")));
 
@@ -3223,6 +3585,9 @@ $("genMoreGo").addEventListener("click", async () => {
 $("genStoryGo").addEventListener("click", async () => {
   const story = $("genStory").value.trim();
   if (story.length < 12) { banner("err", "Give a sentence or two of story."); return; }
+  const via = ($("genVia") && $("genVia").value) || "";
+  if (via) { await generateWith(via); return; }
+
   $("genStoryGo").disabled = true;
   try {
     const { data } = await api("/api/tests/story",

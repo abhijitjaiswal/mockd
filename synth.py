@@ -282,6 +282,15 @@ def wrap_like_spec(route, status, body, message=None, reference=None):
                  if isinstance(b, dict) and b.get("type") != "null"), {})
     inner = real.get("properties") or {}
 
+    # StandardResponseModel[NoneType] — the document says this operation returns
+    # no data, and a DELETE that answered {"id": ..., "message": "deleted"} was
+    # contradicting the very schema it is meant to demonstrate. The document
+    # wins, exactly as it does over a curated overlay entry.
+    if branches and all(isinstance(b, dict) and b.get("type") == "null"
+                        for b in branches):
+        return {"status_code": int(status),
+                "message": message or "Successful Response", "data": None}
+
     data = body
     if isinstance(body, list) and "items" in inner:
         data = {"items": body, "total": len(body), "page": 1, "page_size": 10}

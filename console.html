@@ -370,6 +370,8 @@
   <span class="brand">mockd</span>
   <span id="pill" class="pill off"><span class="dot"></span><span id="pilltext">stopped</span></span>
   <code id="baseurl" style="font-size:12px;color:var(--muted)"></code>
+  <span class="tag" id="selfcheck" hidden
+        title="the mock answering its own document, run the moment it started"></span>
   <span class="grow"></span>
   <button id="btnStart" class="primary">Start</button>
   <button id="btnStop" class="danger" disabled>Stop</button>
@@ -738,6 +740,45 @@
           <button class="primary" id="wbSave">Save as a flow</button>
         </div>
         <p class="hint" id="wbSaveNote"></p>
+        <label for="wbData" style="margin-top:9px">The flow's data — values the steps
+          use that no step produces (one per line, <code>name=value</code>)</label>
+        <textarea id="wbData" rows="2"
+          placeholder="levelId=8f3c2a1e-…    # an id nothing in the spec returns"></textarea>
+        <p class="hint">Anything here is in scope for every step. It is how a value the
+          document cannot supply gets into a flow without hardcoding it in a body.</p>
+      </div>
+    </div>
+
+    <!-- ------------------------------------ WHERE IDS COME FROM -->
+    <div class="card" id="bindCard">
+      <h3>Where ids come from <span class="grow"></span>
+        <span class="tag" id="bindCount"></span>
+        <button class="sm" id="bindRefresh">Refresh</button></h3>
+      <div class="body">
+        <p class="hint" style="margin-top:0">A spec says <code>position_id</code> is a
+          required uuid; it never says which endpoint returns one. These are worked out
+          from what your endpoints actually return, and anything you decide here is
+          remembered — the brief and every generated test use it from then on.</p>
+        <div id="bindList"></div>
+        <div class="row" style="margin-top:11px;align-items:end">
+          <div><label for="bindEnv">Learn field names from</label>
+            <select id="bindEnv"></select></div>
+          <div><button class="sm" id="bindLearn">Sweep it (reads only)</button></div>
+          <div><span class="tag" id="bindLearned"></span></div>
+        </div>
+        <p class="hint">Where the document declares no response shape, the mock
+          invents one — its dashboard answers <code>items</code> where a real server
+          answers something else. Learn the names from the server you will run
+          against, or a capture will point at a field only the mock has.</p>
+        <div class="row" style="margin-top:11px;align-items:end">
+          <div><label for="bindSuite">Fix placeholder ids in a saved suite</label>
+            <select id="bindSuite"></select></div>
+          <div><button class="sm" id="bindFix">Replace placeholders with captures</button></div>
+        </div>
+        <p class="hint" id="bindFixNote">A test written before its ids were known holds
+          <code>REPLACE_WITH_…</code> in its data and sends that string to the server.
+          This swaps each one for a real capture — adding setup calls where needed —
+          and refuses to write anything unless the result still validates.</p>
       </div>
     </div>
 
@@ -753,12 +794,33 @@
           <label for="genStory">The story</label>
           <textarea id="genStory" rows="3"
             placeholder="As an administrator I want to create a team and add approval levels to it, so that requests raised under it follow the right chain."></textarea>
+          <div class="row" id="genViaRow" style="margin-top:8px">
+            <div><label for="genVia">Write the tests with</label>
+              <select id="genVia">
+                <option value="">nobody — just give me the prompt</option>
+              </select></div>
+            <div><label for="genModule">Module — blank names it after the story</label>
+              <input type="text" id="genModule" placeholder="addresses"></div>
+          </div>
+          <div class="check" style="margin:2px 0 8px 0">
+            <input type="checkbox" id="genRefine">
+            <label for="genRefine">Draw out what the story implies first
+              — behaviour only; endpoints and fields always come from the spec</label>
+          </div>
           <div class="btnrow">
             <button class="primary" id="genStoryGo">Build the brief</button>
           <button class="sm" id="genMoreGo">Or: more like the tests I already have</button>
             <span class="hint">Paste it into whatever assistant your team uses, then bring
               the JSON back through Import — it is checked the same either way.</span>
           </div>
+        </div>
+        <div id="genLifeRow" hidden>
+          <div class="btnrow">
+            <button class="primary" id="genLifeGo">Derive from the spec</button>
+            <button class="sm" id="genLifeImport" disabled>Add them to drafts</button>
+            <span class="hint" id="genLifeNote"></span>
+          </div>
+          <div id="genLifeOut"></div>
         </div>
         <div class="row" id="genPipeRow" hidden>
           <div><label for="genFormat">For</label>
@@ -812,6 +874,7 @@
               <button class="sm" id="btnExport">Export…</button>
               <button class="sm" id="btnPipeline">Pipeline…</button>
               <button class="sm" id="btnStory">From a story…</button>
+              <button class="sm" id="btnLifecycle">Lifecycles from the spec…</button>
               <button class="sm" id="btnTestsRefresh">Refresh</button>
             </div>
           </div>

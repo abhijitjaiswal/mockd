@@ -571,7 +571,10 @@ def say(text):
 def run(spec, base_url, headers, args):
     pool = IdPool(json.loads(Path(args.fixtures).read_text()) if args.fixtures else None)
     skip = {s.strip() for s in (args.skip or [])}
-    stream_words = re.compile(r"stream|sse|watch|subscribe|events", re.I)
+    # Whole words only. Unanchored, "sse" matches inside "List Addresses" and
+    # "events" inside "/inventory/events-log", so an ordinary endpoint was
+    # dropped as a stream and never appeared in the report at all.
+    stream_words = re.compile(r"\b(stream|streaming|sse|watch|subscribe|events)\b", re.I)
 
     def deselected(route):
         if route["key"] in skip:
@@ -600,6 +603,18 @@ def run(spec, base_url, headers, args):
     phase2 = [r for r in readonly if not is_list(r)]
 
     results = []
+
+    # A deselected or stream-like operation used to be printed once and then
+    # forgotten, so the report held fewer rows than the spec has operations and
+    # "48 / 48" looked like full coverage. Record it, so every operation in the
+    # spec is accounted for in exactly one bucket.
+    for route, why in dropped:
+        results.append({"operation": route["key"], "summary": route["summary"],
+                        "tags": route["tags"], "level": SKIP, "status": None,
+                        "duration_ms": 0,
+                        "checks": [{"check": "skipped", "level": SKIP, "detail": why}],
+                        "documented_statuses":
+                            sorted(str(k) for k in route["responses"])})
 
     def execute(route):
         rng = random.Random(route["key"])
@@ -802,11 +817,21 @@ def summarise(spec, results, args):
               f"First error:\n    {first}")
 
     if skipped:
-        why = ("POST/PUT/PATCH/DELETE — pass --allow-writes to include them "
-               "(safe here: the mock's store is in memory)" if args.target == "mock"
-               else "POST/PUT/PATCH/DELETE change real data in this environment; "
-                    "pass --allow-writes to include them")
-        print(f"  {len(skipped)} not run       {why}")
+        # Not every skip is a write. Saying so in one breath hid a stream-like
+        # operation (and anything deselected) behind the writes explanation.
+        writes_why = ("POST/PUT/PATCH/DELETE — pass --allow-writes to include them "
+                      "(safe here: the mock's store is in memory)" if args.target == "mock"
+                      else "POST/PUT/PATCH/DELETE change real data in this environment; "
+                           "pass --allow-writes to include them")
+        reasons = {}
+        for r in skipped:
+            detail = next((c.get("detail") for c in r.get("checks", [])
+                           if c.get("check") == "skipped"), "not run")
+            key = writes_why if "allow-writes" in (detail or "") else detail
+            reasons[key] = reasons.get(key, 0) + 1
+        print(f"  {len(skipped)} not run")
+        for why, count in sorted(reasons.items(), key=lambda kv: -kv[1]):
+            print(f"     {count:3d}           {why}")
 
     undocumented = [r for r in results
                     if any(c["check"] == "status_documented" and c["level"] == ERROR

@@ -1,0 +1,14 @@
+{
+  "name": "mockd-demo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Browser suites for the mockd console. Playwright drives the real UI in a real browser, so these check what a person actually sees rather than what a function returns. Run them with demo/run.sh.",
+  "scripts": {
+    "postinstall": "playwright install chromium",
+    "test": "bash run.sh sanity",
+    "test:all": "bash run.sh all"
+  },
+  "devDependencies": {
+    "playwright": "^1.47.0"
+  }
+}

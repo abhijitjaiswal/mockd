@@ -42,9 +42,13 @@ const check = (n, ok, d) => { ok ? pass++ : fail++;
   check("and which environment it ran against", /on mock/.test(head), head.slice(0, 110));
   check("and how it went", /pass|fail|blocked/.test(head), head.slice(0, 110));
 
-  // one test means one test, not its neighbours
-  const rows = await p.locator("#testRows .runrow, #testRows > *").count();
-  check("only the chosen test ran", rows <= 3, `${rows} rows`);
+  // One test means one test, not its neighbours. This used to count rows, which
+  // conflated "how many tests ran" with "how many STEPS the chosen test has":
+  // as soon as the first test in the list was a six-step flow, a correct run
+  // looked like a broken one. The header's own outcome counts are per test.
+  const ran = (head.match(/(\d+)\s+(pass|fail|blocked|error|skip)/gi) || [])
+    .reduce((total, bit) => total + parseInt(bit, 10), 0);
+  check("only the chosen test ran", ran === 1, `header said: ${head.slice(0, 110)}`);
 
   // a whole section
   await p.locator('[data-act="run-suite"]').first().click();
