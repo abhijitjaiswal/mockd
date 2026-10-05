@@ -66,6 +66,8 @@ async function titleCard(page, name, heading, sub) {
 
   console.log(`capturing ${CONSOLE_URL}`);
   await page.goto(CONSOLE_URL, { waitUntil: "networkidle" });
+  // the lesser screens are folded under More in the sidebar
+  await page.evaluate(() => window.showMore(true));
   await page.waitForTimeout(1500);
 
   await titleCard(page, "title", "One spec.<br>Three teams.",

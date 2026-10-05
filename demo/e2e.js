@@ -20,6 +20,10 @@ function check(name, ok, detail) {
   p.on("console", (m) => { if (m.type() === "error") errs.push("console: " + m.text()); });
 
   await p.goto("http://localhost:4100", { waitUntil: "networkidle" });
+
+  // the lesser screens are folded under More in the sidebar
+
+  await p.evaluate(() => window.showMore(true));
   await p.waitForTimeout(2500);
 
   // ---------------------------------------------------------------- shell

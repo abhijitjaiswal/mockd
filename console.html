@@ -362,6 +362,22 @@
             margin-bottom:11px;background:var(--bg)}
   .stepedit h5{margin:0 0 7px;font-size:12px;font-weight:650;display:flex;gap:8px;
                align-items:center}
+  .navmore{display:block;width:100%;text-align:left;background:none;border:0;
+           cursor:pointer;font:inherit}
+  #navMoreItems a{padding-left:22px}
+  .homenext{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  .homenext .say{flex:1 1 260px}
+  .homenext .say b{display:block;font-size:16px;margin-bottom:3px}
+  .homenext .say span{color:var(--muted);font-size:13px}
+  .homerow{display:flex;gap:12px;align-items:flex-start;padding:11px 2px;
+           border-bottom:1px solid var(--line)}
+  .homerow:last-child{border-bottom:0}
+  .homerow .dot{width:22px;height:22px;border-radius:50%;flex:0 0 22px;display:grid;
+                place-items:center;font-size:12px;font-weight:700;color:#fff;margin-top:1px}
+  .homerow .dot.ok{background:var(--ok,#136c34)} .homerow .dot.todo{background:#b25e00}
+  .homerow .dot.idle{background:var(--muted)}
+  .homerow .what{flex:1;min-width:0}
+  .homerow .what b{font-size:13.5px} .homerow .what div{font-size:12.5px;color:var(--muted)}
   .libbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   .libbar input[type=search]{flex:1 1 220px;min-width:160px}
   .libbar select{width:auto;min-width:0}
@@ -422,18 +438,20 @@
 </div>
 
 <nav class="side">
-  <div class="group">The contract</div>
-  <a data-view="overview" class="on">Overview <span class="n" id="navCov"></span></a>
-  <a data-view="connect">Connect</a>
-  <a data-view="authoring">Authoring <span class="n" id="navScore"></span></a>
-  <a data-view="source">Source <span class="n" id="navLock"></span></a>
-  <div class="group">Work</div>
+  <a data-view="home" class="on">Home</a>
   <a data-view="create">Create tests</a>
-  <a data-view="explore">Explore <span class="n" id="navOps"></span></a>
   <a data-view="tests">Tests <span class="n" id="navTests"></span></a>
   <div class="group">Setup</div>
-  <a data-view="environments">Environments <span class="n" id="navEnvs"></span></a>
-  <a data-view="server">Server</a>
+  <a data-view="source">API document <span class="n" id="navLock"></span></a>
+  <a data-view="environments">Servers <span class="n" id="navEnvs"></span></a>
+  <button type="button" class="group navmore" id="navMore" aria-expanded="false">More ▸</button>
+  <div id="navMoreItems" hidden>
+    <a data-view="explore">Try a request <span class="n" id="navOps"></span></a>
+    <a data-view="overview">Spec coverage <span class="n" id="navCov"></span></a>
+    <a data-view="authoring">Spec quality <span class="n" id="navScore"></span></a>
+    <a data-view="connect">Use the mock in an app</a>
+    <a data-view="server">Mock settings</a>
+  </div>
 </nav>
 
 <!-- Feedback belongs to the app, not to one view: every view fires banner(). -->
@@ -447,7 +465,22 @@
 <main>
 
   <!-- ===================================== OVERVIEW -->
-  <section class="view on" data-view="overview">
+  <!-- ============================================================ HOME -->
+  <section class="view on" data-view="home">
+    <header>
+      <h2>Home</h2>
+      <p>Where things stand, and the one thing to do next.</p>
+    </header>
+    <div class="card" id="homeNextCard">
+      <div class="body homenext" id="homeNext">Checking…</div>
+    </div>
+    <div class="card">
+      <h3>Where things stand</h3>
+      <div class="body" id="homeList"></div>
+    </div>
+  </section>
+
+  <section class="view" data-view="overview">
     <header>
       <h2>What the document actually says</h2>
       <p>Every operation graded on the three things a spec can leave out: what comes back on
@@ -1269,7 +1302,7 @@
               <option value="spec">422 + detail[] — what the real API returns</option>
               <option value="debug">400 + every violating field named</option>
             </select>
-            <div class="check" style="margin-top:11px"><input type="checkbox" id="stateful">
+            <div class="check" style="margin-top:11px"><input type="checkbox" id="stateful" checked>
               <label for="stateful">Stateful CRUD</label></div>
             <div class="check"><input type="checkbox" id="requireAuth">
               <label for="requireAuth">Require Authorization</label></div>

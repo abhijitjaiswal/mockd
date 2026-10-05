@@ -21,6 +21,8 @@ const check = (n, ok, d) => { ok ? pass++ : fail++;
   p.on("console", (m) => { if (m.type() === "error" && !/status of 4\d\d/.test(m.text()))
                              errs.push("console: " + m.text()); });
   await p.goto("http://localhost:4100", { waitUntil: "networkidle" });
+  // the lesser screens are folded under More in the sidebar
+  await p.evaluate(() => window.showMore(true));
   await p.waitForTimeout(1800);
   await p.locator('nav.side a[data-view="tests"]').click();
   // these suites exercise the tools kept under Advanced, which is shut by default

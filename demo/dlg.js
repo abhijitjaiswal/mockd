@@ -7,6 +7,8 @@ const path = require("path");
   const p = await c.newPage();
   const errs=[]; p.on("pageerror",e=>errs.push(e.message));
   await p.goto("http://localhost:4100",{waitUntil:"networkidle"});
+  // the lesser screens are folded under More in the sidebar
+  await p.evaluate(() => window.showMore(true));
   await p.waitForTimeout(2500);
   await p.locator('nav.side a[data-view="explore"]').click(); await p.waitForTimeout(700);
   await p.locator("#method").selectOption("GET");

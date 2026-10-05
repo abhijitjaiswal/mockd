@@ -25,6 +25,8 @@ const ask = (p, method, path) => p.evaluate(async ([m, pa]) => {
   p.on("console", (m) => { if (m.type() === "error" && !/status of 4\d\d/.test(m.text()))
                              errs.push("console: " + m.text()); });
   await p.goto("http://localhost:4100", { waitUntil: "networkidle" });
+  // the lesser screens are folded under More in the sidebar
+  await p.evaluate(() => window.showMore(true));
   await p.waitForTimeout(1800);
 
   // find operations in whatever spec is loaded: one with a required query

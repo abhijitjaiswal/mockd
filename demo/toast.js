@@ -50,6 +50,8 @@ const check = (n, ok, d) => { ok ? pass++ : fail++;
     }
   });
   await p.goto("http://localhost:4100", { waitUntil: "networkidle" });
+  // the lesser screens are folded under More in the sidebar
+  await p.evaluate(() => window.showMore(true));
   await p.waitForTimeout(2000);
 
   // the toast lives in the shell, so it is reachable from every view

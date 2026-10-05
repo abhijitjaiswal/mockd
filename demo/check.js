@@ -9,6 +9,8 @@ const path = require("path");
   p.on("pageerror", e => errs.push("pageerror: " + e.message));
   p.on("console", m => { if (m.type()==="error") errs.push("console: " + m.text()); });
   await p.goto("http://localhost:4100", { waitUntil:"networkidle" });
+  // the lesser screens are folded under More in the sidebar
+  await p.evaluate(() => window.showMore(true));
   await p.waitForTimeout(2500);
   for (const v of ["overview","authoring","source","connect","explore","tests","environments","server"]) {
     await p.locator(`nav.side a[data-view="${v}"]`).click();

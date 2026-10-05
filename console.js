@@ -30,6 +30,10 @@ function showView(name) {
   window.scrollTo(0, 0);
   if (name === "tests") { loadTests(); fillTestSelectors(); fillTypeList();
                          loadBindings(); fillBindSuites(); loadBaseline(); }
+  if (name === "home") homeLoad();
+  // a screen kept under More still has to show as the current one
+  const link = document.querySelector(`nav.side a[data-view="${name}"]`);
+  if (link && link.closest("#navMoreItems")) showMore(true);
   if (name === "create") czLoad();
   if (name === "source") loadProjectSpec();
   if (name === "explore" && !ROUTES.length && RUNNING) loadRoutes();
@@ -3483,6 +3487,124 @@ $("bindRefresh").addEventListener("click", loadBindings);
 
 /* Fix a suite in place rather than regenerating it: the tests somebody already
    reviewed keep their shape, and only the placeholder ids change. */
+/* ----------------------------------------------------------------- home
+   The first screen answers two questions and nothing else: is everything in
+   place, and what should I do now. Each line is a fact with one action beside
+   it; the first thing that is not done yet is lifted to the top as the next
+   step, so nobody has to work out an order. */
+function showMore(on) {
+  const open = on === undefined ? $("navMoreItems").hidden : !!on;
+  $("navMoreItems").hidden = !open;
+  $("navMore").textContent = open ? "More ▾" : "More ▸";
+  $("navMore").setAttribute("aria-expanded", String(open));
+  try { localStorage.setItem("mockd.more", open ? "1" : ""); } catch { /* private mode */ }
+}
+window.showMore = showMore;
+$("navMore").addEventListener("click", () => showMore());
+try { if (localStorage.getItem("mockd.more") === "1") showMore(true); } catch { /* fine */ }
+
+async function homeLoad() {
+  const get = async (url) => { try { return (await api(url)).data || {}; } catch { return {}; } };
+  const [state, proj, check, base, tax, envs] = await Promise.all([
+    get("/api/state"), get("/api/project"), get("/api/mock/selfcheck"),
+    get("/api/tests/baseline"), get("/api/tests/taxonomy"), get("/api/environments")]);
+
+  const spec = proj.spec || "";
+  const specThere = !!spec && (proj.specs || []).includes(spec)
+    || ((proj.modules || []).find((m) => m.module === "mock") || {}).exists;
+  const running = !!state.running;
+  const ops = (state.drift || {}).spec_operations;
+  const verified = ((check.summary || {}).ok) || 0;
+  const broken = check.failed_count || 0;
+  const mine = (tax.modules || []).filter((m) => m.name !== "baseline")
+    .reduce((n, m) => n + m.tests, 0);
+  const mockRun = (base.by_env || {}).mock;
+  const others = (envs.environments || []).filter((e) => !/^mock/.test(e.name));
+  const ready = others.filter((e) => e.ready);
+
+  const rows = [
+    { key: "spec", ok: specThere,
+      title: specThere ? "API document loaded" : "No API document yet",
+      note: specThere ? `${esc(spec)}${ops ? ` — ${ops} operations` : ""}`
+                      : "Everything starts from your API document (OpenAPI / Swagger). "
+                        + "Give a file or a link.",
+      action: ["Change", "source"], todo: ["Add your API document", "source"] },
+    { key: "mock", ok: running,
+      title: running ? "Mock server is running" : "Mock server is stopped",
+      note: running
+        ? `${esc(state.base_url || "")}`
+          + (check.state === "done"
+              ? (broken ? ` — ${broken} operation(s) do not match the document`
+                        : ` — ${verified} operations checked against the document`)
+              : check.state === "running" ? " — checking itself against the document…" : "")
+        : "The mock answers like your API would, so the app and the tests have "
+          + "something to talk to today.",
+      action: ["Settings", "server"], todo: ["Start the mock", "start"] },
+    { key: "baseline", ok: !!base.exists && !!mockRun && mockRun.other === 0,
+      idle: !!base.exists && !mockRun,
+      title: base.exists ? `${base.tests} baseline tests ready` : "Baseline tests not made yet",
+      note: base.exists
+        ? (mockRun ? `${mockRun.pass} of ${mockRun.pass + mockRun.other} passing on the mock.`
+                   : "Made for you from the document. They have not been run yet.")
+        : "They are made automatically once the mock is running.",
+      action: ["Run them", "baseline"], todo: [base.exists ? "Run the baseline" : "Start the mock",
+                                               base.exists ? "baseline" : "start"] },
+    { key: "tests", ok: mine > 0, idle: mine === 0,
+      title: mine ? `${mine} test${mine === 1 ? "" : "s"} of your own` : "No tests of your own yet",
+      note: mine ? "Find, run and manage them under Tests."
+                 : "Describe what you want proven and they are written and tried for you.",
+      action: ["Create more", "create"], todo: ["Create tests", "create"] },
+    { key: "servers", ok: ready.length > 0, idle: ready.length === 0,
+      title: ready.length ? `${ready.length} other server${ready.length === 1 ? "" : "s"} ready: `
+                            + ready.map((e) => esc(e.name)).join(", ")
+                          : "No other server set up yet",
+      note: ready.length ? "The same tests run there — pick the server on the Tests screen."
+                         : "Add your dev or staging address to run the same tests against it.",
+      action: ["Manage", "environments"], todo: ["Set up a server", "environments"] },
+  ];
+
+  const next = rows.find((r) => !r.ok && !r.idle) || rows.find((r) => !r.ok) || null;
+  $("homeNext").innerHTML = next
+    ? `<div class="say"><b>Next: ${esc(next.todo[0])}</b><span>${next.note}</span></div>
+       <button class="primary" data-homego="${esc(next.todo[1])}">${esc(next.todo[0])}</button>`
+    : `<div class="say"><b>Everything is in place.</b>
+         <span>Create tests for what you want proven, or run what you have.</span></div>
+       <button class="primary" data-homego="create">Create tests</button>
+       <button data-homego="tests">Open Tests</button>`;
+
+  $("homeList").innerHTML = rows.map((r) => `
+    <div class="homerow" data-home="${r.key}">
+      <span class="dot ${r.ok ? "ok" : r.idle ? "idle" : "todo"}">${r.ok ? "✓" : r.idle ? "·" : "!"}</span>
+      <span class="what"><b>${r.title}</b><div>${r.note}</div></span>
+      <button class="sm" data-homego="${esc((r.ok ? r.action : r.todo)[1])}">${
+        esc((r.ok ? r.action : r.todo)[0])}</button>
+    </div>`).join("");
+
+  document.querySelectorAll('.view[data-view="home"] [data-homego]').forEach((b) =>
+    b.addEventListener("click", async () => {
+      const go = b.dataset.homego;
+      if (go === "start") {
+        b.disabled = true; b.textContent = "Starting…";
+        // Start it directly. Pressing the top-bar button from here did nothing
+        // whenever the page still believed the mock was running — it had been
+        // stopped somewhere else — because that button was disabled.
+        await refreshState();
+        $("stateful").checked = true;     // tests read back what they create
+        await start();
+        for (let i = 0; i < 40; i++) {            // then say what happened, here
+          const now = await get("/api/state");
+          if (now.running) break;
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+        await homeLoad();
+        setTimeout(homeLoad, 6000);       // once its self-check and baseline land
+        return;
+      }
+      if (go === "baseline") { showView("tests"); setTimeout(() => $("baseRun").click(), 600); return; }
+      showView(go);
+    }));
+}
+
 /* ------------------------------------------------------------- the list
    One list of every test, with a search box and four filters. This is the whole
    Tests screen for most people: find what you care about, pick a server, press
@@ -4501,5 +4623,9 @@ function rememberedHint(remembered) {
   await loadEnvironments();
   fillTestEnvs();
   await loadTests();
+  // open where the address says, or on Home, which is where anyone new starts
+  const want = location.hash.replace("#", "");
+  if (want && document.querySelector(`.view[data-view="${want}"]`)) showView(want);
+  else homeLoad();
   setInterval(() => { if (RUNNING) refreshStdout(); }, 5000);
 })();

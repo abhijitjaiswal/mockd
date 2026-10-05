@@ -9,6 +9,8 @@ const ck=(n,ok,d)=>{ok?pass++:fail++;console.log(`  ${ok?"ok  ":"FAIL"}  ${n}${o
   const p=await c.newPage();
   p.on("pageerror",e=>errs.push(e.message));
   await p.goto("http://localhost:4100",{waitUntil:"networkidle"}); await p.waitForTimeout(2500);
+  // the lesser screens are folded under More in the sidebar
+  await p.evaluate(() => window.showMore(true));
 
   console.log("\nSAVE DIALOG — assertion editor");
   await p.locator('nav.side a[data-view="explore"]').click(); await p.waitForTimeout(700);
