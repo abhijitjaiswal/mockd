@@ -640,6 +640,66 @@ def parameter_cases(spec):
 KINDS = ("lifecycle", "contract", "omission", "parameter")
 
 
+def fingerprint(test):
+    """What a generated test looked like when it was generated.
+
+    Regenerating must never overwrite somebody's work. A test whose content
+    still matches this is untouched and safe to replace; one that does not has
+    been edited, and from then on it is theirs."""
+    body = {k: v for k, v in (test or {}).items() if k != "generated"}
+    return hashlib.sha256(json.dumps(body, sort_keys=True, default=str)
+                          .encode()).hexdigest()[:16]
+
+
+def stamp(suite):
+    for test in (suite.get("cases") or []) + (suite.get("scenarios") or []):
+        test.setdefault("generated", {})["fingerprint"] = fingerprint(test)
+    return suite
+
+
+def untouched(test):
+    mark = (test.get("generated") or {}).get("fingerprint")
+    return bool(mark) and mark == fingerprint(test)
+
+
+def merge(existing, fresh):
+    """Bring a saved baseline up to date with a freshly derived one.
+
+      * a generated test nobody touched is replaced by its new version
+      * one somebody edited — a step, a priority, a description — is kept as is
+      * one written by hand in the same suite is kept
+      * an untouched one whose operation has left the document is dropped
+
+    Returns (suite, what happened)."""
+    done = {"added": 0, "updated": 0, "unchanged": 0, "kept_edited": 0, "removed": 0}
+    out = {**fresh, "data": {**(fresh.get("data") or {}),
+                             **((existing or {}).get("data") or {})}}
+    for group in ("cases", "scenarios"):
+        old = {t.get("id"): t for t in ((existing or {}).get(group) or [])}
+        merged, seen = [], set()
+        for test in (fresh.get(group) or []):
+            ident = test.get("id")
+            seen.add(ident)
+            before = old.get(ident)
+            if before is None:
+                merged.append(test); done["added"] += 1
+            elif not untouched(before):
+                merged.append(before); done["kept_edited"] += 1
+            elif fingerprint(before) == fingerprint(test):
+                merged.append(before); done["unchanged"] += 1
+            else:
+                merged.append(test); done["updated"] += 1
+        for ident, before in old.items():
+            if ident in seen:
+                continue
+            if untouched(before):
+                done["removed"] += 1          # its operation is gone, and so is it
+            else:
+                merged.append(before); done["kept_edited"] += 1
+        out[group] = merged
+    return out, done
+
+
 def load_index():
     """What each endpoint returns, from the mock's last self-check, if any."""
     try:
@@ -680,7 +740,7 @@ def build(spec, only=None, kinds=KINDS, name="derived", index=None):
     if only:
         cases = [c for c in cases if re.search(only, c["id"])]
 
-    return {"name": name,
+    return stamp({"name": name,
             "_why": "Derived from the spec by blueprint.py, not written by hand and "
                     "not written by a model. Regenerate with: python blueprint.py. "
                     "These flows read back what they create, so against the mock they "
@@ -688,7 +748,7 @@ def build(spec, only=None, kinds=KINDS, name="derived", index=None):
                     "fresh id per request and the read cannot match the create.",
             "data": {},
             "cases": cases,
-            "scenarios": flows}, skipped
+            "scenarios": flows}), skipped
 
 
 def main():

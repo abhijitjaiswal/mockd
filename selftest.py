@@ -261,6 +261,61 @@ def group_references():
                all(v.startswith("<") for v in data.values()) and len(data) == 2, data)
 
 
+def group_baseline():
+    """Regenerating must never overwrite somebody's work."""
+    import blueprint as b
+
+    def case(ident, path="/a", **extra):
+        return {"id": ident, "request": {"method": "GET", "path": path},
+                "assertions": [{"type": "status", "equals": 200}], **extra}
+
+    fresh = b.stamp({"name": "baseline", "data": {},
+                     "cases": [case("one"), case("two")], "scenarios": []})
+    check_true("stamp: every generated test carries what it looked like",
+               all((c.get("generated") or {}).get("fingerprint") for c in fresh["cases"]))
+    check_true("untouched: a test nobody edited is recognised", b.untouched(fresh["cases"][0]))
+
+    saved, done = b.merge(None, fresh)
+    check("merge: the first time, everything is new", done["added"], 2)
+
+    again = b.stamp({"name": "baseline", "data": {},
+                     "cases": [case("one"), case("two")], "scenarios": []})
+    _, done = b.merge(saved, again)
+    check("merge: nothing changed means nothing is rewritten",
+          (done["unchanged"], done["updated"], done["added"]), (2, 0, 0))
+
+    # somebody makes one theirs
+    saved["cases"][0]["priority"] = "P0"
+    check_true("untouched: an edited test is no longer ours to replace",
+               not b.untouched(saved["cases"][0]))
+    moved = b.stamp({"name": "baseline", "data": {},
+                     "cases": [case("one", "/changed"), case("two", "/changed")],
+                     "scenarios": []})
+    merged, done = b.merge(saved, moved)
+    by_id = {c["id"]: c for c in merged["cases"]}
+    check("merge: the edited one is kept exactly as it was",
+          (by_id["one"]["priority"], by_id["one"]["request"]["path"]), ("P0", "/a"))
+    check("merge: the untouched one follows the document",
+          by_id["two"]["request"]["path"], "/changed")
+    check("merge: and the count says so", (done["kept_edited"], done["updated"]), (1, 1))
+
+    # an operation leaves the document
+    gone = b.stamp({"name": "baseline", "data": {}, "cases": [case("one")],
+                    "scenarios": []})
+    merged, done = b.merge(merged, gone)
+    check_true("merge: an untouched test for a removed operation goes with it",
+               "two" not in {c["id"] for c in merged["cases"]} and done["removed"] == 1,
+               done)
+    check_true("merge: an edited one stays even then",
+               "one" in {c["id"] for c in merged["cases"]})
+
+    # a hand-written test sharing the suite
+    merged["cases"].append(case("mine"))
+    merged, done = b.merge(merged, gone)
+    check_true("merge: a test somebody wrote by hand in the same suite is kept",
+               "mine" in {c["id"] for c in merged["cases"]}, done)
+
+
 def group_record():
     """A test as something to manage: how much it matters, whether it is in use."""
     import tests as t
@@ -1117,6 +1172,7 @@ GROUPS = {
     "runid": group_runid,
     "rebind": group_rebind,
     "record": group_record,
+    "baseline": group_baseline,
     "references": group_references,
     "story": group_story,
     "blueprint": group_blueprint,

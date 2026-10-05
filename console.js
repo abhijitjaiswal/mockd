@@ -29,7 +29,7 @@ function showView(name) {
   location.hash = name;
   window.scrollTo(0, 0);
   if (name === "tests") { loadTests(); fillTestSelectors(); fillTypeList();
-                         loadBindings(); fillBindSuites(); }
+                         loadBindings(); fillBindSuites(); loadBaseline(); }
   if (name === "source") loadProjectSpec();
   if (name === "explore" && !ROUTES.length && RUNNING) loadRoutes();
   if (name === "authoring" && !GUIDE) { loadRules(); loadGuide(); }
@@ -3480,6 +3480,54 @@ $("bindRefresh").addEventListener("click", loadBindings);
 
 /* Fix a suite in place rather than regenerating it: the tests somebody already
    reviewed keep their shape, and only the placeholder ids change. */
+/* The tests nobody had to write. They exist as soon as a spec is loaded, so the
+   first thing a new person can do is press one button and see every
+   integration point answer. */
+async function loadBaseline() {
+  let d;
+  try { ({ data: d } = await api("/api/tests/baseline")); } catch { return; }
+  if (!d.exists) {
+    $("baseCount").textContent = "not made yet";
+    $("baseCount").className = "tag warn";
+    $("baseState").textContent = "Start the mock on your spec and they are made for you.";
+    $("baseRun").disabled = true;
+    return;
+  }
+  $("baseRun").disabled = false;
+  $("baseCount").className = "tag ok";
+  $("baseCount").textContent = `${d.tests} ready`;
+  const kinds = Object.entries(d.kinds || {}).map(([k, v]) => `${v} ${k}`).join(" · ");
+  const ran = Object.entries(d.by_env || {}).map(([env, r]) =>
+    `${env}: ${r.pass} of ${r.pass + r.other} passing`).join("  ·  ");
+  const needs = (d.needs_values || []).length
+    ? `  ·  needs a real value for ${d.needs_values.join(", ")}` : "";
+  $("baseState").textContent = [kinds, ran].filter(Boolean).join("  —  ") + needs;
+}
+
+$("baseRun").addEventListener("click", async () => {
+  await runScoped({ suite: "baseline", drafts: true, what: "the baseline" });
+  await loadBaseline();
+});
+
+$("baseRefresh").addEventListener("click", async () => {
+  $("baseRefresh").disabled = true;
+  try {
+    const { data } = await api("/api/tests/baseline", { method: "POST", body: "{}" });
+    if (!data.ok) {
+      banner("err", data.error || data.skipped || (data.errors || []).join("  ·  "));
+      return;
+    }
+    const bits = [];
+    if (data.added) bits.push(`${data.added} new`);
+    if (data.updated) bits.push(`${data.updated} updated`);
+    if (data.removed) bits.push(`${data.removed} removed`);
+    if (data.kept_edited) bits.push(`${data.kept_edited} of yours left as they are`);
+    banner("ok", `Baseline is up to date with ${data.spec}`
+                 + (bits.length ? ` — ${bits.join(", ")}.` : " — nothing changed."));
+    await loadTests(); await loadBaseline();
+  } finally { $("baseRefresh").disabled = false; }
+});
+
 async function fillBindEnvs(current) {
   const names = (ENVS || []).map((e) => e.name);
   $("bindEnv").innerHTML = (names.length ? names : ["mock"])

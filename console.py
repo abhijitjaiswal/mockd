@@ -437,6 +437,98 @@ def defaults():
 SELFCHECK = {"job": None, "started": None, "spec": None}
 
 
+BASELINE = {"last": None}
+
+
+def refresh_baseline(reason="asked"):
+    """Derive the baseline suite from the project spec and merge it into what
+    is saved — so the tests that prove each integration point exist before
+    anybody has written one.
+
+    Only for the PROJECT spec. A mock started "just this once" on some other
+    document must not rewrite the team's baseline to match it."""
+    import blueprint as bp
+    import hashlib
+    import tests as t
+    spec_path = project.active_spec(None)
+    if mock.running and mock.options.get("spec") \
+            and project.active_spec(mock.options.get("spec")) != spec_path:
+        return {"ok": False, "skipped": "the mock is not on the project spec"}
+    spec = load_project_spec() if not mock.running else None
+    try:
+        from mockd import Source, Spec
+        text, _ = Source(spec_path, poll=0, cache_dir=str(LOG_DIR)).read(force=True)
+        spec = Spec(text=text, origin=spec_path)
+    except Exception as exc:
+        return {"ok": False, "error": f"could not read {spec_path}: {exc}"}
+
+    fresh, skipped = bp.build(spec, name="baseline", index=id_index("mock"))
+    existing = next((su for su in t.load_suites(include_drafts=True)
+                     if su.get("name") == "baseline" and su.get("_stage") == "draft"), None)
+    merged, done = bp.merge(existing, fresh)
+    merged["generated_for"] = {
+        "spec": spec_path,
+        "digest": hashlib.sha256((text or "").encode()).hexdigest()[:16],
+        "operations": len(spec.routes)}
+
+    problems = [e for test in (merged.get("scenarios") or [])
+                for e in t.validate_test({**test, "data": {**(merged.get("data") or {}),
+                                                           **(test.get("data") or {})}},
+                                         "scenario")]
+    problems += [e for test in (merged.get("cases") or [])
+                 for e in t.validate_test(test, "case")]
+    if problems:
+        return {"ok": False, "errors": problems[:10]}
+
+    changed = bool(done["added"] or done["updated"] or done["removed"]) or existing is None
+    if changed:
+        if existing is not None and existing.get("_path"):
+            merged["_path"] = existing["_path"]
+        t.save_suite(merged, stage="draft")
+    result = {"ok": True, "reason": reason, "spec": spec_path, "written": changed,
+              "tests": len(merged.get("cases") or []) + len(merged.get("scenarios") or []),
+              "flows": len(merged.get("scenarios") or []),
+              "cases": len(merged.get("cases") or []),
+              "skipped_resources": [{"resource": n, "why": w} for n, w in skipped],
+              "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **done}
+    BASELINE["last"] = result
+    return result
+
+
+@app.get("/api/tests/baseline")
+def tests_baseline():
+    """The tests that exist without anyone writing them, and how they are."""
+    import tests as t
+    suite = next((su for su in t.load_suites(include_drafts=True)
+                  if su.get("name") == "baseline" and su.get("_stage") == "draft"), None)
+    if suite is None:
+        return jsonify({"exists": False, "last": BASELINE.get("last")})
+    items = (suite.get("cases") or []) + (suite.get("scenarios") or [])
+    kinds = {}
+    for item in items:
+        kind = (item.get("generated") or {}).get("kind") or (
+            "lifecycle" if "steps" in item else "yours")
+        kinds[kind] = kinds.get(kind, 0) + 1
+    history = t.load_history()
+    by_env = {}
+    for item in items:
+        for env, seen in ((history.get(f"baseline/{item.get('id')}") or {})
+                          .get("by_env") or {}).items():
+            slot = by_env.setdefault(env, {"pass": 0, "other": 0})
+            slot["pass" if seen.get("last_outcome") == "pass" else "other"] += 1
+    return jsonify({"exists": True, "tests": len(items), "kinds": kinds,
+                    "generated_for": suite.get("generated_for"),
+                    "needs_values": sorted({name for item in items for name in
+                                            ((item.get("generated") or {})
+                                             .get("needs_values") or [])}),
+                    "by_env": by_env, "last": BASELINE.get("last")})
+
+
+@app.post("/api/tests/baseline")
+def tests_baseline_refresh():
+    return jsonify(refresh_baseline("asked"))
+
+
 def begin_selfcheck(spec_path):
     """Ask the mock, the moment it comes up, whether it answers its own spec.
 
@@ -452,6 +544,20 @@ def begin_selfcheck(spec_path):
            "--report", str(LOG_DIR / "mock-selfcheck.json")]
     job = start_job(cmd, timeout=300)
     SELFCHECK.update(job=job, started=time.time(), spec=spec_path)
+
+    def then_baseline():
+        # The self-check is what tells us which endpoint returns which id, and
+        # the baseline needs that to read its foreign keys — so it follows it.
+        for _ in range(600):
+            if (JOBS.get(job) or {}).get("done"):
+                break
+            time.sleep(0.5)
+        try:
+            refresh_baseline("the mock started")
+        except Exception as exc:
+            BASELINE["last"] = {"ok": False, "error": str(exc)}
+
+    threading.Thread(target=then_baseline, daemon=True).start()
     return job
 
 
