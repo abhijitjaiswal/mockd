@@ -36,6 +36,8 @@ process.on("exit", () => {
   await p.goto("http://localhost:4100", { waitUntil: "networkidle" });
 
   await p.locator('nav.side a[data-view="tests"]').click();
+  // these suites exercise the tools kept under Advanced, which is shut by default
+  await p.evaluate(() => window.showAdvanced(true));
   await p.waitForTimeout(400);
 
   check("the control is offered without typing anything",

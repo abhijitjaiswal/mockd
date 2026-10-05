@@ -78,6 +78,8 @@ const check = (n, ok, d) => { ok ? pass++ : fail++;
 
   // --------------------------------------- 2. an assertion scoped to an env
   await p.locator('nav.side a[data-view="tests"]').click();
+  // these suites exercise the tools kept under Advanced, which is shut by default
+  await p.evaluate(() => window.showAdvanced(true));
   await p.waitForTimeout(1600);
   await p.locator("#wbToggle").click(); await p.waitForTimeout(1400);
   await p.locator('[data-asserts="0"] summary').click(); await p.waitForTimeout(400);

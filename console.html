@@ -362,6 +362,20 @@
             margin-bottom:11px;background:var(--bg)}
   .stepedit h5{margin:0 0 7px;font-size:12px;font-weight:650;display:flex;gap:8px;
                align-items:center}
+  .libbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .libbar input[type=search]{flex:1 1 220px;min-width:160px}
+  .libbar select{width:auto;min-width:0}
+  .librow{border-bottom:1px solid var(--line);padding:10px 2px}
+  .librow .top{display:flex;gap:9px;align-items:center;cursor:pointer}
+  .librow .nm{font-weight:600;font-size:13.5px}
+  .librow .sub{font-size:11.5px;color:var(--muted);margin:2px 0 0 0}
+  .librow .more{margin:9px 0 2px 0;padding:10px 12px;border:1px solid var(--line);
+                border-radius:8px}
+  .libres{font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px;
+          border:1px solid currentColor;white-space:nowrap}
+  .libres.pass{color:var(--ok,#136c34)} .libres.fail{color:var(--err)}
+  .libres.never{color:var(--muted)}
+  .advbar{display:flex;gap:10px;align-items:center;margin:18px 0 10px 0}
   .czbig{font-size:15px;font-weight:600;margin:0 0 6px 0;display:block}
   .czsteps{display:inline-flex;gap:6px;font-size:11.5px;font-weight:500}
   .czsteps span{padding:2px 9px;border-radius:999px;border:1px solid var(--line);
@@ -810,12 +824,64 @@
 
   <section class="view" data-view="tests">
     <header>
-      <h2>Saved tests</h2>
-      <p>One file per module — the sections come from the spec's own tags. Labels like
-         <code>smoke</code> or <code>negative</code> cut across them, for choosing what to
-         run. No URL or token lives in a test; everything that changes between servers is a
-         variable.</p>
+      <h2>Tests</h2>
+      <p>Every test you have, what it is for, and how it did. Pick a server, press Run.</p>
     </header>
+    <!-- ------------------------------------ BASELINE -->
+    <div class="card" id="baseCard">
+      <h3>Baseline tests <span class="grow"></span>
+        <span class="tag" id="baseCount"></span></h3>
+      <div class="body">
+        <p class="hint" id="baseNote" style="margin-top:0">These are made for you from
+          the API document — nobody has to write them. They check that every
+          integration point answers the way the document says, and they run against
+          any server.</p>
+        <div class="btnrow">
+          <button class="primary" id="baseRun">Run the baseline</button>
+          <button class="sm" id="baseRefresh">Refresh from the spec</button>
+          <span class="hint" id="baseState"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ------------------------------------ THE LIST -->
+    <div class="card" id="libCard">
+      <h3>Your tests <span class="grow"></span><span class="tag" id="libCount"></span></h3>
+      <div class="body">
+        <div class="libbar">
+          <input type="search" id="libSearch" placeholder="Search by name…">
+          <select id="libModule" title="module"></select>
+          <select id="libType" title="type"></select>
+          <select id="libPriority" title="priority"></select>
+          <select id="libResult" title="how it did on the chosen server"></select>
+          <span class="grow"></span>
+          <label for="libEnv" style="margin:0;font-size:12px">Run on</label>
+          <select id="libEnv"></select>
+          <button class="primary" id="libRun">Run these</button>
+        </div>
+        <div id="libList"></div>
+        <div class="btnrow" id="libPager" style="margin-top:10px"></div>
+      </div>
+    </div>
+
+    <div class="card" id="testOutCard" hidden>
+          <h3>Result <span class="grow"></span>
+            <span class="tag" id="testProgress"></span>
+            <button class="sm" id="testReport">Download report</button>
+          <button class="sm" id="testRaw">Raw log</button></h3>
+          <div id="testOutHead" class="banner" hidden></div>
+          <div id="testRows" class="runrows"></div>
+        <div id="testVerdicts" class="body" hidden></div>
+          <pre id="testOut" hidden></pre>
+        </div>
+
+    <!-- ------------------------------------ ADVANCED -->
+    <div class="advbar">
+      <button class="sm" id="advToggle" aria-expanded="false">Advanced tools ▸</button>
+      <span class="hint">Build a flow step by step, set where ids come from, generate a
+        CI pipeline, import and export. You do not need these to create or run tests.</span>
+    </div>
+    <div id="advWrap" hidden>
     <!-- ---------------------------------------------------- WORKBENCH -->
     <div class="card" id="wbCard">
       <h3>Workbench <span class="grow"></span>
@@ -858,23 +924,6 @@
           placeholder="levelId=8f3c2a1e-…    # an id nothing in the spec returns"></textarea>
         <p class="hint">Anything here is in scope for every step. It is how a value the
           document cannot supply gets into a flow without hardcoding it in a body.</p>
-      </div>
-    </div>
-
-    <!-- ------------------------------------ BASELINE -->
-    <div class="card" id="baseCard">
-      <h3>Baseline tests <span class="grow"></span>
-        <span class="tag" id="baseCount"></span></h3>
-      <div class="body">
-        <p class="hint" id="baseNote" style="margin-top:0">These are made for you from
-          the API document — nobody has to write them. They check that every
-          integration point answers the way the document says, and they run against
-          any server.</p>
-        <div class="btnrow">
-          <button class="primary" id="baseRun">Run the baseline</button>
-          <button class="sm" id="baseRefresh">Refresh from the spec</button>
-          <span class="hint" id="baseState"></span>
-        </div>
       </div>
     </div>
 
@@ -1022,17 +1071,8 @@
             <div class="empty">No suites yet — send a request and use “Save as test…”.</div>
           </div>
         </div>
-        <div class="card" id="testOutCard" hidden>
-          <h3>Result <span class="grow"></span>
-            <span class="tag" id="testProgress"></span>
-            <button class="sm" id="testReport">Download report</button>
-          <button class="sm" id="testRaw">Raw log</button></h3>
-          <div id="testOutHead" class="banner" hidden></div>
-          <div id="testRows" class="runrows"></div>
-        <div id="testVerdicts" class="body" hidden></div>
-          <pre id="testOut" hidden></pre>
-        </div>
       </div>
+    </div>
     </div>
   </section>
 

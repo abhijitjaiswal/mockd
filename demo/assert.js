@@ -52,7 +52,9 @@ const ck=(n,ok,d)=>{ok?pass++:fail++;console.log(`  ${ok?"ok  ":"FAIL"}  ${n}${o
   ck("saved", !(await p.locator("#saveDlg").isVisible()));
 
   console.log("\nEDIT DIALOG — structured editing");
-  await p.locator('nav.side a[data-view="tests"]').click(); await p.waitForTimeout(1500);
+  await p.locator('nav.side a[data-view="tests"]').click();
+  // these suites exercise the tools kept under Advanced, which is shut by default
+  await p.evaluate(() => window.showAdvanced(true)); await p.waitForTimeout(1500);
   const row2 = p.locator(".titem").filter({hasText:"Assertion editor probe"}).first();
   await row2.locator('button[data-act="edit"]').click(); await p.waitForTimeout(1200);
   const n = await p.locator("#editBuilt .arow2").count();

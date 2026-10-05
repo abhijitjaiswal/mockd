@@ -35,6 +35,8 @@ const check = (n, ok, d) => { ok ? pass++ : fail++;
   }, many);
 
   await p.locator('nav.side a[data-view="tests"]').click();
+  // these suites exercise the tools kept under Advanced, which is shut by default
+  await p.evaluate(() => window.showAdvanced(true));
   await p.waitForTimeout(1800);
 
   const bulk = p.locator('.suite:has(.name:text("bulk-probe"))');

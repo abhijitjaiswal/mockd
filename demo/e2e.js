@@ -140,7 +140,9 @@ function check(name, ok, detail) {
 
   // ---------------------------------------------------------------- tests
   console.log("\nTESTS");
-  await p.locator('nav.side a[data-view="tests"]').click(); await p.waitForTimeout(1500);
+  await p.locator('nav.side a[data-view="tests"]').click();
+  // these suites exercise the tools kept under Advanced, which is shut by default
+  await p.evaluate(() => window.showAdvanced(true)); await p.waitForTimeout(1500);
   check("sections rendered", await p.locator("#testTree .suite").count() > 0);
   check("saved test appears",
         (await p.locator("#testTree").textContent()).includes("e2e-probe-case")

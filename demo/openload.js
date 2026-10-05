@@ -24,6 +24,8 @@ const check = (n, ok, d) => { ok ? pass++ : fail++;
   await p.goto("http://localhost:4100", { waitUntil: "networkidle" });
   await p.waitForTimeout(1600);
   await p.locator('nav.side a[data-view="tests"]').click();
+  // these suites exercise the tools kept under Advanced, which is shut by default
+  await p.evaluate(() => window.showAdvanced(true));
   await p.waitForTimeout(1600);
 
   // find a saved scenario with more than one step

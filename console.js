@@ -852,6 +852,7 @@ async function loadTests() {
   // click, which aborted the redraw and made the filter look like it did nothing
   let suites = data.suites || [];
   TESTS_CACHE = suites;
+  libRender();
   const total = suites.reduce((n, s) => n + s.cases.length + s.scenarios.length, 0);
   $("testCount").textContent = total ? `${total} in ${suites.length} section(s)` : "none yet";
   $("navTests").textContent = total || "";
@@ -1174,6 +1175,7 @@ async function showRunReport(job, label) {
    silently replacing work somebody is in the middle of is the one thing this
    must never do. */
 async function wbLoad(suite, id, stage) {
+  showAdvanced(true);                 // the workbench is an advanced tool
   const q = new URLSearchParams({ suite, id, stage: stage || "draft" });
   const { data } = await api("/api/tests/one?" + q);
   const test = data.test || data;
@@ -1399,8 +1401,8 @@ function fillTestEnvs() {
 /* Change how a test is managed without opening what it does. Re-prioritising
    before a release should not mean editing steps. */
 let TESTS_CACHE = [];
-function openRecordEditor(suite, stage, id) {
-  const host = document.querySelector(
+function openRecordEditor(suite, stage, id, where) {
+  const host = where || $("testTree").querySelector(
     `[data-rechost="${CSS.escape(suite)}|${CSS.escape(stage)}|${CSS.escape(id)}"]`);
   if (!host) return;
   if (host.innerHTML) { host.innerHTML = ""; return; }      // second click closes
@@ -3481,6 +3483,199 @@ $("bindRefresh").addEventListener("click", loadBindings);
 
 /* Fix a suite in place rather than regenerating it: the tests somebody already
    reviewed keep their shape, and only the placeholder ids change. */
+/* ------------------------------------------------------------- the list
+   One list of every test, with a search box and four filters. This is the whole
+   Tests screen for most people: find what you care about, pick a server, press
+   Run. Building flows by hand, id bindings, pipelines and import/export are
+   still here, under Advanced tools, which stays shut unless asked for. */
+const LIB = { q: "", module: "", type: "", priority: "", result: "", page: 0, open: null };
+const LIB_PAGE = 25;
+
+function showAdvanced(on) {
+  const open = on === undefined ? $("advWrap").hidden : !!on;
+  $("advWrap").hidden = !open;
+  $("advToggle").textContent = open ? "Advanced tools ▾" : "Advanced tools ▸";
+  $("advToggle").setAttribute("aria-expanded", String(open));
+  try { localStorage.setItem("mockd.advanced", open ? "1" : ""); } catch { /* private mode */ }
+}
+window.showAdvanced = showAdvanced;
+$("advToggle").addEventListener("click", () => showAdvanced());
+try { if (localStorage.getItem("mockd.advanced") === "1") showAdvanced(true); } catch { /* fine */ }
+
+function libAll() {
+  return (TESTS_CACHE || []).flatMap((s) =>
+    [...(s.cases || []).map((t) => ({ ...t, flow: false })),
+     ...(s.scenarios || []).map((t) => ({ ...t, flow: true }))]
+      .map((t) => ({ ...t, suite: s.name, stage: s.stage })));
+}
+
+function libOutcome(t, env) {
+  const seen = ((t.history || {}).by_env || {})[env];
+  if (!seen || !seen.last_outcome) return "never";
+  return seen.last_outcome === "pass" ? "pass" : "fail";
+}
+
+function libFiltered() {
+  const env = $("libEnv").value || "mock";
+  const q = LIB.q.toLowerCase();
+  return libAll().filter((t) =>
+    (!q || `${t.name || ""} ${t.id} ${t.description || ""}`.toLowerCase().includes(q))
+    && (!LIB.module || t.suite === LIB.module)
+    && (!LIB.type || (t.levels || []).includes(LIB.type))
+    && (!LIB.priority || t.priority === LIB.priority)
+    && (!LIB.result || libOutcome(t, env) === LIB.result));
+}
+
+function libFillPickers() {
+  const all = libAll();
+  const keep = (id, options, current) => {
+    const html = options.map(([v, label]) =>
+      `<option value="${esc(v)}"${v === current ? " selected" : ""}>${esc(label)}</option>`).join("");
+    if ($(id).innerHTML !== html) $(id).innerHTML = html;
+  };
+  const modules = [...new Set(all.map((t) => t.suite))].sort();
+  keep("libModule", [["", "All modules"], ...modules.map((m) => [m, m])], LIB.module);
+  keep("libType", [["", "All types"], ...["smoke", "sanity", "regression", "negative",
+       "performance"].map((l) => [l, l])], LIB.type);
+  keep("libPriority", [["", "Any priority"], ["P0", "P0 — must never break"],
+       ["P1", "P1 — main paths"], ["P2", "P2 — ordinary"], ["P3", "P3 — edges"]], LIB.priority);
+  keep("libResult", [["", "Any result"], ["pass", "Passing"], ["fail", "Not passing"],
+       ["never", "Never run"]], LIB.result);
+  if ($("testEnv").options.length && $("libEnv").options.length !== $("testEnv").options.length) {
+    $("libEnv").innerHTML = $("testEnv").innerHTML;
+    $("libEnv").value = $("testEnv").value;
+  }
+}
+
+function libRender() {
+  if (!$("libList")) return;
+  libFillPickers();
+  const env = $("libEnv").value || "mock";
+  const all = libAll(), shown = libFiltered();
+  const pages = Math.max(1, Math.ceil(shown.length / LIB_PAGE));
+  LIB.page = Math.min(LIB.page, pages - 1);
+  const slice = shown.slice(LIB.page * LIB_PAGE, (LIB.page + 1) * LIB_PAGE);
+  $("libCount").textContent = shown.length === all.length
+    ? `${all.length} test${all.length === 1 ? "" : "s"}`
+    : `${shown.length} of ${all.length}`;
+  $("libRun").textContent = shown.length === all.length ? "Run all"
+    : `Run these ${shown.length}`;
+  $("libRun").disabled = !shown.length;
+
+  const WORD = { pass: "passes", fail: "does not pass", never: "not run yet" };
+  $("libList").innerHTML = slice.length ? slice.map((t) => {
+    const key = `${t.suite}|${t.stage}|${t.id}`;
+    const out = libOutcome(t, env);
+    const open = LIB.open === key;
+    const servers = Object.entries(((t.history || {}).by_env) || {}).map(([name, r]) =>
+      `<span class="libres ${r.last_outcome === "pass" ? "pass" : "fail"}"
+             title="${esc(r.last_run || "")}">${esc(name)}: ${
+        r.last_outcome === "pass" ? "passes" : esc(r.last_outcome || "?")}</span>`).join(" ");
+    return `<div class="librow" data-lib="${esc(key)}">
+      <div class="top" data-libopen="${esc(key)}">
+        <span class="prio ${esc(t.priority)}">${esc(t.priority)}</span>
+        <span style="flex:1;min-width:0">
+          <div class="nm">${esc(t.name || t.id)}</div>
+          <div class="sub">${esc(t.suite)} · ${(t.levels || []).map(esc).join(", ")}
+            ${t.flow ? ` · ${(t.steps || []).length} steps` : ""}
+            ${t.stage === "shared" ? " · shared with the team" : ""}
+            ${t.status && t.status !== "ready" ? ` · <b>${esc(t.status)}</b>` : ""}
+            ${t.owner ? ` · ${esc(t.owner)}` : ""}</div>
+        </span>
+        <span class="libres ${out}">${WORD[out]}</span>
+        <button class="sm" data-librun="${esc(key)}">Run</button>
+      </div>
+      ${open ? `<div class="more">
+        ${t.description ? `<div style="font-size:13px;margin-bottom:8px">${esc(t.description)}</div>` : ""}
+        ${t.flow ? `<div class="sub" style="margin-bottom:8px">${(t.steps || []).map((st, i) =>
+            `${i + 1}. ${esc(st.name || `${st.method} ${st.path}`)}`).join("<br>")}</div>`
+          : `<div class="sub" style="margin-bottom:8px">${esc(t.method || "")} ${esc(t.path || "")}</div>`}
+        ${servers ? `<div style="margin-bottom:8px">${servers}</div>` : ""}
+        ${(t.links || []).length ? `<div class="sub" style="margin-bottom:8px">Linked: ${t.links.map(esc).join(", ")}</div>` : ""}
+        <div class="btnrow">
+          <button class="sm" data-libact="record" data-key="${esc(key)}">Edit details</button>
+          <button class="sm" data-libact="open" data-key="${esc(key)}">Edit steps</button>
+          ${t.stage === "draft" ? `<button class="sm" data-libact="promote" data-key="${esc(key)}"
+              ${(t.history || {}).last_pass ? "" : "disabled"}
+              title="${(t.history || {}).last_pass ? "put it in the shared suite the whole team runs"
+                       : "it has to pass once before it can be shared"}">Share with team</button>` : ""}
+          <button class="sm danger" data-libact="delete" data-key="${esc(key)}">Remove</button>
+        </div>
+        <div data-libhost="${esc(key)}"></div>
+      </div>` : ""}
+    </div>`;
+  }).join("") : `<div class="empty">${all.length
+      ? "Nothing matches those filters."
+      : "No tests yet. Start the mock for a baseline, or use Create tests."}</div>`;
+
+  $("libPager").innerHTML = pages > 1 ? `
+    <button class="sm" data-libpage="${LIB.page - 1}" ${LIB.page ? "" : "disabled"}>‹ Previous</button>
+    <span class="hint">${LIB.page * LIB_PAGE + 1}–${Math.min((LIB.page + 1) * LIB_PAGE, shown.length)}
+      of ${shown.length}</span>
+    <button class="sm" data-libpage="${LIB.page + 1}" ${LIB.page < pages - 1 ? "" : "disabled"}>Next ›</button>` : "";
+
+  const parts = (key) => { const [suite, stage, ...rest] = key.split("|");
+                           return { suite, stage, id: rest.join("|") }; };
+  $("libList").querySelectorAll("[data-libopen]").forEach((el) =>
+    el.addEventListener("click", (ev) => {
+      if (ev.target.closest("button")) return;
+      LIB.open = LIB.open === el.dataset.libopen ? null : el.dataset.libopen;
+      libRender();
+    }));
+  $("libList").querySelectorAll("[data-librun]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const { suite, stage, id } = parts(b.dataset.librun);
+      b.disabled = true; b.textContent = "running…";
+      await runScoped({ suite, only: `^${escapeRegex(id)}( |$)`,
+                        drafts: true, what: id });
+      $("testOutCard").scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }));
+  $("libList").querySelectorAll("[data-libact]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const { suite, stage, id } = parts(b.dataset.key);
+      if (b.dataset.libact === "record") {
+        openRecordEditor(suite, stage, id,
+          $("libList").querySelector(`[data-libhost="${CSS.escape(b.dataset.key)}"]`));
+        return;
+      }
+      if (b.dataset.libact === "open") { await testAction("open", suite, id, stage); return; }
+      if (b.dataset.libact === "delete" && !b.dataset.sure) {
+        // one stray click should not cost somebody a test
+        b.dataset.sure = "1"; b.textContent = "Really remove?";
+        setTimeout(() => { if (b.isConnected) { delete b.dataset.sure; b.textContent = "Remove"; } }, 4000);
+        return;
+      }
+      await testAction(b.dataset.libact, suite, id, stage);
+    }));
+  $("libPager").querySelectorAll("[data-libpage]").forEach((b) =>
+    b.addEventListener("click", () => { LIB.page = Number(b.dataset.libpage); libRender(); }));
+}
+
+$("libSearch").addEventListener("input", () => { LIB.q = $("libSearch").value.trim(); LIB.page = 0; libRender(); });
+for (const [id, field] of [["libModule", "module"], ["libType", "type"],
+                           ["libPriority", "priority"], ["libResult", "result"]]) {
+  $(id).addEventListener("change", () => { LIB[field] = $(id).value; LIB.page = 0; libRender(); });
+}
+$("libEnv").addEventListener("change", () => { $("testEnv").value = $("libEnv").value; libRender(); });
+$("libRun").addEventListener("click", async () => {
+  const shown = libFiltered(), all = libAll();
+  if (!shown.length) return;
+  const env = $("libEnv").value || "mock";
+  $("testEnv").value = env;
+  $("libRun").disabled = true;
+  const label = $("libRun").textContent;
+  $("libRun").textContent = "Running…";
+  try {
+    const everything = shown.length === all.length;
+    await runScoped({
+      only: everything ? undefined
+        : "^(" + shown.map((t) => escapeRegex(t.id)).join("|") + ")( |$)",
+      drafts: true,
+      what: everything ? "all tests" : `${shown.length} test${shown.length === 1 ? "" : "s"}` });
+    $("testOutCard").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  } finally { $("libRun").textContent = label; $("libRun").disabled = false; libRender(); }
+});
+
 /* ------------------------------------------------------------ create tests
    One path from a sentence to tests that have been tried. Everything a person
    used to do by hand afterwards — check the JSON, fix the ids, run it once to

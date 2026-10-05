@@ -40,6 +40,8 @@ process.on("exit", () => { try { fs.rmSync(FILE, { force: true }); } catch { /* 
   check("a probe test exists to manage", saved.ok === true, JSON.stringify(saved).slice(0, 120));
 
   await p.locator('nav.side a[data-view="tests"]').click();
+  // these suites exercise the tools kept under Advanced, which is shut by default
+  await p.evaluate(() => window.showAdvanced(true));
   await p.waitForTimeout(1500);
 
   // ------------------------------------------------------------ the picker

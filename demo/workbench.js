@@ -29,6 +29,8 @@ const NESTED = EP.NESTED;
   await p.goto("http://localhost:4100", { waitUntil: "networkidle" });
   await p.waitForTimeout(1800);
   await p.locator('nav.side a[data-view="tests"]').click();
+  // these suites exercise the tools kept under Advanced, which is shut by default
+  await p.evaluate(() => window.showAdvanced(true));
   await p.waitForTimeout(1200);
 
   check("the workbench is on the Tests view", await p.locator("#wbCard").count() === 1);

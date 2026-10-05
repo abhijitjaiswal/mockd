@@ -48,7 +48,9 @@ const ck=(n,ok,d)=>{ok?pass++:fail++;console.log(`  ${ok?"ok  ":"FAIL"}  ${n}${o
   await p.locator("#dlgSave").click(); await p.waitForTimeout(1500);
 
   console.log("\nRUN NOW — edit dialog");
-  await p.locator('nav.side a[data-view="tests"]').click(); await p.waitForTimeout(1500);
+  await p.locator('nav.side a[data-view="tests"]').click();
+  // these suites exercise the tools kept under Advanced, which is shut by default
+  await p.evaluate(() => window.showAdvanced(true)); await p.waitForTimeout(1500);
   const row = p.locator(".titem").filter({hasText:"runnow-probe"}).first();
   const anyRow = await row.count() ? row : p.locator(".titem").first();
   await anyRow.locator('button[data-act="edit"]').click(); await p.waitForTimeout(1200);
