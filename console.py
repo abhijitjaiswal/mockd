@@ -3327,6 +3327,23 @@ def environment_data(name):
                             "set in .env instead."})
 
 
+def _env_file_for(name):
+    """The file a server is defined in — the shared one, or this machine's own.
+
+    A server kept in the private file is as real as one in the shared file;
+    editing its test data or removing it used to answer "no environment named
+    …" because only the shared file was looked at."""
+    import environments as envmod
+    for path in (envmod.DEFAULT_FILE, envmod.LOCAL_FILE):
+        try:
+            doc = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(doc.get("environments"), dict) and name in doc["environments"]:
+            return path, doc
+    return None, None
+
+
 @app.post("/api/environments/<name>/data")
 def set_environment_data(name):
     """Replace one environment's data block."""
@@ -3336,8 +3353,8 @@ def set_environment_data(name):
     if not isinstance(rows, list):
         return jsonify({"ok": False, "error": "data must be a list of {name, value}"}), 400
 
-    doc = json.loads(envmod.DEFAULT_FILE.read_text())
-    if name not in (doc.get("environments") or {}):
+    target, doc = _env_file_for(name)
+    if target is None:
         return jsonify({"ok": False, "error": f"no environment named {name}"}), 404
 
     secrets = []
@@ -3358,7 +3375,7 @@ def set_environment_data(name):
             data[key] = _coerce(value)
 
     doc["environments"][name]["data"] = data
-    envmod.DEFAULT_FILE.write_text(json.dumps(doc, indent=2) + "\n")
+    target.write_text(json.dumps(doc, indent=2) + "\n")
     if secrets:
         envmod.write_dotenv(dict(secrets))
     return jsonify({"ok": True, "environment": name, "count": len(data),
@@ -3447,11 +3464,16 @@ def delete_environment():
     """Remove an environment this console added."""
     import environments as envmod
     name = (request.get_json(silent=True) or {}).get("name")
-    doc = json.loads(envmod.DEFAULT_FILE.read_text())
-    if name not in (doc.get("environments") or {}):
+    removed = False
+    while True:                       # it may be defined in both files
+        target, doc = _env_file_for(name)
+        if target is None:
+            break
+        doc["environments"].pop(name)
+        target.write_text(json.dumps(doc, indent=2) + "\n")
+        removed = True
+    if not removed:
         return jsonify({"ok": False, "error": f"no environment named {name}"}), 404
-    doc["environments"].pop(name)
-    envmod.DEFAULT_FILE.write_text(json.dumps(doc, indent=2) + "\n")
     return jsonify({"ok": True, "message": f"{name} removed"})
 
 

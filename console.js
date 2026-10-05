@@ -137,6 +137,7 @@ async function start() {
   banner("ok", "Mock server started.");
   watchSelfcheck();
   await refreshState();
+  loadEnvironments();                 // the mock's address follows the port it started on
   await loadCoverage();
   await loadRules();
   await loadSpecStatus();

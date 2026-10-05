@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "note": "Named targets for verify.py, postman.py and the console: python verify.py --env dev. SECRETS DO NOT BELONG HERE. Any value may be written as ${VAR} and is resolved from the shell, from .env, or from environments.local.json \u2014 both of which are gitignored. This file holds the shape of an environment and is safe to commit.",
+    "note": "Named targets for verify.py, postman.py and the console: python verify.py --env <name>. SECRETS DO NOT BELONG HERE. Any value may be written as ${VAR} and is resolved from the shell, from .env, or from environments.local.json \u2014 both of which are gitignored. This file holds the shape of an environment and is safe to commit.",
     "auth_modes": {
       "none": "send nothing (the mock, unless started with --require-auth)",
       "token": "a token you already have: {mode, token, header?, prefix?}",
@@ -12,7 +12,7 @@
   "environments": {
     "mock": {
       "description": "The local mock. Nothing to authenticate against unless it was started with --require-auth.",
-      "base_url": "http://localhost:4010",
+      "base_url": "${MOCK_BASE_URL}",
       "auth": {
         "mode": "none"
       },
@@ -23,49 +23,15 @@
     },
     "mock-auth": {
       "description": "The local mock started with --require-auth, for exercising 401 handling.",
-      "base_url": "http://localhost:4010",
+      "base_url": "${MOCK_BASE_URL}",
       "auth": {
         "mode": "token",
         "token": "any-value-works-the-mock-only-checks-presence"
       }
     },
-    "dev": {
-      "description": "Shared dev backend. This example assumes an API that authenticates by COOKIE: the login route replies with Set-Cookie and an Authorization header is ignored. Point `auth.login.path` at your own login route.",
-      "base_url": "${DEV_BASE_URL}",
-      "auth": {
-        "mode": "login",
-        "path": "/api/v1/auth/session",
-        "method": "POST",
-        "send": "query",
-        "username_field": "username",
-        "password_field": "password",
-        "username": "${DEV_USERNAME}",
-        "password": "${DEV_PASSWORD}",
-        "use_cookies": true
-      },
-      "data": {
-        "departmentTitle": "QA Automation {{$randomInt}}",
-        "knownDepartmentId": "${DEV_DEPARTMENT_ID}",
-        "knownUserId": "${DEV_USER_ID}"
-      }
-    },
-    "staging": {
-      "description": "Staging, using a token issued out of band (CI secret, password manager).",
-      "base_url": "${STAGING_BASE_URL}",
-      "auth": {
-        "mode": "token",
-        "token": "${STAGING_TOKEN}",
-        "header": "Authorization",
-        "prefix": "Bearer "
-      },
-      "data": {
-        "departmentTitle": "QA Automation {{$randomInt}}",
-        "knownDepartmentId": "${STAGING_DEPARTMENT_ID}"
-      }
-    },
     "mock-login": {
       "description": "The local mock, driven through the real login flow \u2014 proves an environment's login config before you point it at dev.",
-      "base_url": "http://localhost:4010",
+      "base_url": "${MOCK_BASE_URL}",
       "auth": {
         "mode": "login",
         "path": "/api/v1/auth/session",
@@ -76,31 +42,6 @@
         "token_path": "data.access_token",
         "use_cookies": true
       }
-    },
-    "dev-cookie": {
-      "description": "Dev, using a cookie copied from the browser \u2014 for when you have a session but not the password. devtools -> Application -> Cookies.",
-      "base_url": "${DEV_BASE_URL}",
-      "auth": {
-        "mode": "none"
-      },
-      "headers": {
-        "Cookie": "${DEV_COOKIE}"
-      },
-      "data": {
-        "knownDepartmentId": "${DEV_DEPARTMENT_ID}"
-      }
-    },
-    "prod": {
-      "description": "Production \u2014 reads only",
-      "base_url": "${PROD_BASE_URL}",
-      "readonly": true,
-      "auth": {
-        "mode": "none"
-      },
-      "headers": {
-        "Cookie": "${PROD_COOKIE}"
-      },
-      "data": {}
     }
   }
 }

@@ -75,6 +75,22 @@ def _dotenv():
     return values
 
 
+def _builtin():
+    """Values this tool knows without being told.
+
+    The mock's address was written into the file as port 4010. Start the mock
+    on any other port — because 4010 was taken — and every test "on the mock"
+    was sent to whatever was listening on 4010 instead. The console records the
+    port a mock was last started on, so read it from there."""
+    port = 4010
+    try:
+        saved = json.loads((HERE / ".mockd-console.json").read_text())
+        port = int(saved.get("port") or port)
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return {"MOCK_BASE_URL": f"http://localhost:{port}"}
+
+
 class Unresolved(Exception):
     """A ${VAR} the environment does not define — better to say so than to send
     the literal string '${DEV_PASSWORD}' at a login endpoint."""
@@ -87,7 +103,7 @@ def resolve(value, missing=None):
         return [resolve(v, missing) for v in value]
     if not isinstance(value, str):
         return value
-    env = {**_dotenv(), **os.environ}
+    env = {**_builtin(), **_dotenv(), **os.environ}
 
     def swap(match):
         name = match.group(1)
