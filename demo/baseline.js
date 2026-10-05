@@ -61,6 +61,32 @@ process.on("exit", () => {
         await p.locator("#baseCount").textContent());
   check("with one button to run them", !(await p.locator("#baseRun").isDisabled()));
 
+  // ------------------------------------- pressing the button, as a person
+  // The first version of this suite ran the baseline through the API and never
+  // clicked anything, and the button gave no sign of life where it was pressed.
+  await p.locator("#baseRun").click();
+  await p.waitForTimeout(400);
+  check("pressing Run says so right where it was pressed",
+        /running/i.test(await p.locator("#baseCount").textContent())
+        || /Running the baseline/.test(await p.locator("#baseState").textContent()),
+        await p.locator("#baseCount").textContent());
+  await p.waitForFunction(
+    () => /passed on/.test(document.querySelector("#baseCount").textContent),
+    null, { timeout: 90000 }).catch(() => {});
+  const shown = (await p.locator("#baseCount").textContent()).trim();
+  check("and then how it went, on the card itself", /\d+ of \d+ passed on mock/.test(shown), shown);
+  const [good, total] = (shown.match(/(\d+) of (\d+)/) || []).slice(1).map(Number);
+  check("every baseline test passes against the mock", total > 0 && good === total, shown);
+  check("the message at the top says the same",
+        /Baseline:/.test(await p.locator("#toast").textContent()),
+        (await p.locator("#toast").textContent()).trim().slice(0, 90));
+  await p.waitForTimeout(1500);                    // the scroll is animated
+  check("and the result is brought into view",
+        await p.locator("#testOutCard").isVisible()
+        && await p.evaluate(() => {
+          const r = document.querySelector("#testOutCard").getBoundingClientRect();
+          return r.top < window.innerHeight && r.bottom > 0; }));
+
   // --------------------------------------- refreshing changes nothing new
   const same = await post("/api/tests/baseline", {});
   check("refreshing an up-to-date baseline succeeds", same.ok === true,

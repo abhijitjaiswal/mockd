@@ -1067,6 +1067,22 @@ class StateStore:
                 any_ = True
         return held if any_ else None
 
+    def _mentions(self, node, noun, into, depth=0):
+        if depth > 6:
+            return
+        if isinstance(node, dict):
+            for key, value in node.items():
+                low = str(key).lower()
+                if low.endswith(("_id", "_ids")) and self._noun(key) == noun:
+                    for item in (value if isinstance(value, list) else [value]):
+                        if isinstance(item, (str, int)):
+                            into.add(str(item))
+                elif isinstance(value, (dict, list)):
+                    self._mentions(value, noun, into, depth + 1)
+        elif isinstance(node, list):
+            for item in node:
+                self._mentions(item, noun, into, depth + 1)
+
     def known(self, name):
         """The ids this mock holds for the resource an id-field names, or None
         when it holds nothing for it.
@@ -1075,7 +1091,21 @@ class StateStore:
         resource it never had rows for would be inventing strictness, exactly as
         accepting any id for a resource it DOES hold invents laxness."""
         with self.lock:
-            return self._held(name)
+            held = self._held(name)
+            if held is None:
+                return None
+            # An id the mock's own rows point at exists as far as the mock is
+            # concerned, even if no list of that resource was seeded. Without
+            # this, creating the first level at runtime made every seeded row's
+            # level_id look made-up — the rows had not changed, only what
+            # counted as known. (Linking uses the strict set above: there the
+            # question is which rows exist, not which ids have been seen.)
+            noun = self._noun(name)
+            held = set(held)
+            for store in self.data.values():
+                for row in store.values():
+                    self._mentions(row, noun, held)
+            return held
 
     def link(self):
         """Make the seeded rows refer to each other.

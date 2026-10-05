@@ -190,14 +190,24 @@ def group_references():
         "/api/v1/orders/seed/notes": {"n-1": {"id": "n-1"}},
     }
 
-    check("known: a resource the mock holds has its ids",
-          store.known("customer_id"), {"c-1", "c-2"})
-    check("known: a compound name is read by its last word",
-          store.known("backup_customer_id"), {"c-1", "c-2"})
+    check("held: a resource the mock holds has its rows' ids",
+          store._held("customer_id"), {"c-1", "c-2"})
+    check("held: a compound name is read by its last word",
+          store._held("backup_customer_id"), {"c-1", "c-2"})
+    grown = m.StateStore()
+    grown.data = {"/api/v1/maps": {"m-1": {"id": "m-1", "level_id": "seeded-level"}},
+                  "/api/v1/depts/d-1/levels": {"new-level": {"id": "new-level"}}}
+    check_true("known: an id the mock's own rows point at still exists after "
+               "the first real one is created",
+               {"seeded-level", "new-level"} <= grown.known("level_id"),
+               grown.known("level_id"))
+
     check("known: a resource it holds nothing for is no evidence, not 'none exist'",
           store.known("warehouse_id"), None)
     check("known: a list seeded under a placeholder parent is not evidence",
           store.known("note_id"), None)
+
+    store.link()
 
     check("path: an id that is not held is reported",
           store.missing_reference({"customer_id": "nope"}), ("customer_id", "nope"))
@@ -231,7 +241,6 @@ def group_references():
     check("filter: an undeclared parameter is not ours to interpret",
           len(store._filtered(route, rows, {"colour": "red"})), 2)
 
-    store.link()
     order = store.data["/api/v1/orders"]["o-1"]
     check_true("link: a seeded foreign key now points at a row that exists",
                order["customer_id"] in {"c-1", "c-2"}, order)

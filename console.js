@@ -3504,9 +3504,33 @@ async function loadBaseline() {
   $("baseState").textContent = [kinds, ran].filter(Boolean).join("  —  ") + needs;
 }
 
+/* The result card lives far down the page. Pressing this and seeing nothing
+   change nearby reads as "broken", so say what is happening right here, and
+   take the reader to the result when it arrives. */
 $("baseRun").addEventListener("click", async () => {
-  await runScoped({ suite: "baseline", drafts: true, what: "the baseline" });
-  await loadBaseline();
+  const env = $("testEnv").value || "mock";
+  $("baseRun").disabled = true;
+  $("baseCount").className = "tag";
+  $("baseCount").textContent = "running…";
+  $("baseState").textContent = `Running the baseline against ${env} — this takes a few seconds.`;
+  try {
+    await runScoped({ suite: "baseline", drafts: true, what: "the baseline" });
+    const rep = LAST_RUN ? ((await api(`/api/job/${LAST_RUN}/report`)).data || {}) : {};
+    const s = rep.summary || {};
+    const total = Object.values(s).reduce((a, n) => a + n, 0);
+    const good = s.pass || 0;
+    await loadBaseline();
+    if (total) {
+      const all = good === total;
+      $("baseCount").className = "tag " + (all ? "ok" : "err");
+      $("baseCount").textContent = `${good} of ${total} passed on ${rep.env || env}`;
+      banner(all ? "ok" : "err",
+             all ? `Baseline: all ${total} passed on ${rep.env || env}.`
+                 : `Baseline: ${total - good} of ${total} did not pass on ${rep.env || env} `
+                   + `— the details are in Result, below.`);
+    }
+    $("testOutCard").scrollIntoView({ behavior: "smooth", block: "start" });
+  } finally { $("baseRun").disabled = false; }
 });
 
 $("baseRefresh").addEventListener("click", async () => {
