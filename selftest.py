@@ -1655,7 +1655,136 @@ def group_observe():
         server.shutdown()
 
 
+def group_trackers():
+    """Where a bug report goes: worked out from an address, and sent."""
+    import json as _json
+    import tempfile
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from pathlib import Path
+    import environments as envmod
+    import trackers
+
+    def kind(address):
+        return trackers.detect(address)["kind"]
+
+    check("trackers: a Jira Cloud address is recognised",
+          (kind("https://acme.atlassian.net/browse/SHOP-12"),
+           trackers.detect("https://acme.atlassian.net/browse/SHOP-12")["project"]), ("jira", "SHOP"))
+    check("trackers: so is a Jira board address",
+          trackers.detect("https://acme.atlassian.net/jira/software/projects/SHOP/boards/3")["project"], "SHOP")
+    check("trackers: a self-hosted Jira is recognised by its issue address",
+          (kind("https://issues.example.org/browse/OPS-7"),
+           trackers.detect("https://issues.example.org/browse/OPS-7")["cloud"]), ("jira", False))
+    found = trackers.detect("https://github.com/acme/shop/issues/4")
+    check("trackers: a GitHub repository", (found["kind"], found["repo"], found["api"]),
+          ("github", "acme/shop", "https://api.github.com"))
+    found = trackers.detect("https://gitlab.com/acme/platform/shop/-/issues")
+    check("trackers: a GitLab project, subgroups and all", (found["kind"], found["project"]),
+          ("gitlab", "acme/platform/shop"))
+    check("trackers: a Slack webhook", kind("https://hooks.slack.com/services/T0/B0/xyz"), "slack")
+    check("trackers: a Teams webhook", kind("https://acme.webhook.office.com/webhookb2/abc"), "teams")
+    other = trackers.detect("https://hooks.example.org/in/42")
+    check("trackers: anything else is a webhook, and it says it is not sure",
+          (other["kind"], other["sure"]), ("webhook", False))
+    try:
+        trackers.detect("acme.atlassian.net")
+        refused = False
+    except trackers.Problem:
+        refused = True
+    check_true("trackers: an address without https:// is refused", refused)
+    forced = trackers.as_kind("https://git.example.org/acme/shop", "gitlab")
+    check("trackers: a self-hosted GitLab can be said to be one",
+          (forced["kind"], forced["api"], forced["project"]),
+          ("gitlab", "https://git.example.org/api/v4", "acme/shop"))
+    check("trackers: Jira Cloud asks for an email and a token; a hosted Jira for a token alone",
+          ([f for f, _, _ in trackers.needs_for({"kind": "jira", "cloud": True})],
+           [f for f, _, _ in trackers.needs_for({"kind": "jira", "cloud": False})]),
+          (["email", "token"], ["token"]))
+    doc = trackers._adf("## Title\n\n**Expected:** 201\n```bash\ncurl x\n```\n")
+    check("trackers: a report becomes the document format Jira Cloud wants",
+          [b["type"] for b in doc["content"]], ["heading", "paragraph", "codeBlock"])
+
+    class Fake(BaseHTTPRequestHandler):
+        got, answer = [], (201, {"key": "OPS-41"})
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            body = _json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+            Fake.got.append({"path": self.path, "auth": self.headers.get("Authorization"),
+                             "private": self.headers.get("PRIVATE-TOKEN"), "body": body})
+            status, payload = Fake.answer
+            raw = _json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Fake)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    keep_file, keep_env = trackers.FILE, envmod.DOTENV
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            trackers.FILE, envmod.DOTENV = Path(tmp) / "connections.json", Path(tmp) / ".env"
+            saved = trackers.save(trackers.detect(f"{base}/browse/OPS-7"), {"token": "pat-secret-1"})
+            on_disk = trackers.FILE.read_text()
+            check_true("trackers: the token is not in the connection file",
+                       "pat-secret-1" not in on_disk and "${TRACKER_TOKEN}" in on_disk, on_disk)
+            check_true("trackers: nor is it shown to the page",
+                       "pat-secret-1" not in _json.dumps(trackers.describe(saved)))
+            sent = trackers.send(trackers.current(), "A title", "## A title\n\n**Expected:** 201\n")
+            last = Fake.got[-1]
+            check("trackers: a hosted Jira gets an issue in the right project",
+                  (last["path"], last["body"]["fields"]["project"]["key"],
+                   last["body"]["fields"]["summary"], last["auth"]),
+                  ("/rest/api/2/issue", "OPS", "A title", "Bearer pat-secret-1"))
+            check("trackers: and the link to it comes back",
+                  (sent["key"], sent["url"]), ("OPS-41", f"{base}/browse/OPS-41"))
+
+            Fake.answer = (201, {"number": 9, "html_url": "https://example.test/acme/shop/issues/9"})
+            trackers.save(trackers.as_kind(f"{base}/acme/shop", "github"), {"token": "gh-secret"})
+            sent = trackers.send(trackers.current(), "T", "body")
+            last = Fake.got[-1]
+            check("trackers: GitHub gets an issue",
+                  (last["path"], last["body"], last["auth"], sent["key"]),
+                  ("/api/v3/repos/acme/shop/issues", {"title": "T", "body": "body"},
+                   "Bearer gh-secret", "#9"))
+
+            Fake.answer = (201, {"iid": 3, "web_url": "https://example.test/acme/shop/-/issues/3"})
+            trackers.save(trackers.as_kind(f"{base}/acme/platform/shop", "gitlab"), {"token": "gl-secret"})
+            sent = trackers.send(trackers.current(), "T", "body")
+            last = Fake.got[-1]
+            check("trackers: GitLab gets an issue, the project path encoded",
+                  (last["path"], last["private"], sent["url"]),
+                  ("/api/v4/projects/acme%2Fplatform%2Fshop/issues", "gl-secret",
+                   "https://example.test/acme/shop/-/issues/3"))
+
+            Fake.answer = (200, {})
+            trackers.save(trackers.as_kind(f"{base}/services/T0/B0/xyz", "slack"), {})
+            check_true("trackers: a channel's address is itself the secret, and is kept out of the file",
+                       "/services/T0" not in trackers.FILE.read_text(), trackers.FILE.read_text())
+            trackers.send(trackers.current(), "T", "body")
+            check_true("trackers: a channel gets the report as a message",
+                       Fake.got[-1]["path"] == "/services/T0/B0/xyz" and "T" in Fake.got[-1]["body"]["text"])
+
+            Fake.answer = (401, {"message": "Bad credentials"})
+            try:
+                trackers.send(trackers.current(), "T", "body")
+                said = ""
+            except trackers.Problem as exc:
+                said = str(exc)
+            check_true("trackers: a refused credential is said in words", "refused the credential" in said, said)
+    finally:
+        trackers.FILE, envmod.DOTENV = keep_file, keep_env
+        server.shutdown()
+
+
 GROUPS = {
+    "trackers": group_trackers,
     "observe": group_observe,
     "impact": group_impact,
     "needs": group_needs,

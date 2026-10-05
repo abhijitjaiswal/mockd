@@ -853,6 +853,7 @@ async function followJob(jobId, pre, elapsed, cancelBtn, onDone, rowsEl, progres
 let SUGGESTED = null;
 
 async function loadTests() {
+  await trackerLoad();
   const { data } = await api("/api/tests");
   // reassigned below when a label is selected — `const` here threw on every
   // click, which aborted the redraw and made the filter look like it did nothing
@@ -3832,6 +3833,100 @@ $("srvAdd").addEventListener("click", () => {
   };
 });
 
+/* ------------------------------------------------------------- trackers
+   A bug report that has to be copied into another window is sometimes not
+   sent. Connecting the place it goes takes one thing: its address. What it is
+   — Jira, GitHub, a Slack channel — is read from the address, and only what
+   that kind of place needs is then asked for. */
+let TRACKER = null;
+async function trackerLoad() {
+  try { TRACKER = ((await api("/api/tracker")).data || {}).connection || null; } catch { TRACKER = null; }
+}
+
+function trackerForm(host, test) {
+  if (!host) return;
+  host.innerHTML = `<div class="czneed" data-trackerform>
+    <b>Where should bug reports go?</b>
+    <div class="hint" style="margin:3px 0 7px">Paste the address of your Jira project, GitHub or GitLab
+      repository, or a Slack or Teams channel's webhook. This is asked once.</div>
+    <input type="text" data-traddr placeholder="https://yourteam.atlassian.net/browse/ABC-1" autocomplete="off">
+    <div data-trmore></div>
+    <div class="btnrow" style="margin-top:9px">
+      <button class="primary sm" data-trgo disabled>Connect and send</button>
+      <button class="sm" data-trcancel>Cancel</button>
+      <span class="hint">A token is kept on this computer only.</span>
+    </div></div>`;
+  const addr = host.querySelector("[data-traddr]"), more = host.querySelector("[data-trmore]");
+  const go = host.querySelector("[data-trgo]");
+  let chosen = "", timer = null;
+  const look = async () => {
+    const address = addr.value.trim();
+    if (!address) { more.innerHTML = ""; go.disabled = true; return; }
+    const { data } = await api("/api/tracker/detect", { method: "POST",
+      body: JSON.stringify({ address, kind: chosen || undefined }) });
+    if (addr.value.trim() !== address) return;                    // typed on since
+    if (!data.ok) { more.innerHTML = `<div class="hint" style="margin-top:6px">${esc(data.error)}</div>`; go.disabled = true; return; }
+    more.innerHTML = `
+      <div style="margin-top:8px;font-size:13px">${data.sure ? "This is" : "This looks like"} <b>${esc(data.name)}</b>
+        <span class="hint">— ${esc(data.what)}.</span>
+        <span class="hint" style="margin-left:8px">Not right? It is
+          <select data-trkind style="width:auto;display:inline-block;padding:2px 6px">${Object.entries(data.kinds).map(([k, v]) =>
+            `<option value="${esc(k)}"${k === data.kind ? " selected" : ""}>${esc(v)}</option>`).join("")}</select></span></div>
+      ${data.project_missing ? '<div class="hint" style="color:var(--err);margin-top:4px">That address does not say which project. Paste one like …/browse/ABC-1 or …/projects/ABC.</div>' : ""}
+      ${(data.needs || []).map((n) => `<label style="margin-top:8px">${esc(n.label)}</label>
+        <input type="${n.secret ? "password" : "text"}" data-trneed="${esc(n.field)}" autocomplete="off" style="max-width:460px">`).join("")}`;
+    more.querySelector("[data-trkind]").onchange = (ev) => { chosen = ev.target.value; look(); };
+    go.disabled = !!data.project_missing;
+  };
+  addr.addEventListener("input", () => { chosen = ""; clearTimeout(timer); timer = setTimeout(look, 350); });
+  host.querySelector("[data-trcancel]").onclick = () => { host.innerHTML = ""; };
+  go.onclick = async () => {
+    const secrets = {};
+    more.querySelectorAll("[data-trneed]").forEach((el) => { secrets[el.dataset.trneed] = el.value.trim(); });
+    go.disabled = true;
+    const { data } = await api("/api/tracker/connect", { method: "POST",
+      body: JSON.stringify({ address: addr.value.trim(), kind: chosen || undefined, secrets }) });
+    if (!data.ok) { banner("err", data.error || "could not connect"); go.disabled = false; return; }
+    TRACKER = data.connection;
+    await trackerSend(host, test, false);
+  };
+  addr.focus();
+}
+
+async function trackerSend(host, test, again, button) {
+  if (button) { button.disabled = true; button.textContent = "Sending…"; }
+  const { data } = await api("/api/tests/bug/send", { method: "POST",
+    body: JSON.stringify({ ...test, env: $("libEnv").value || "mock", again: !!again }) });
+  if (data.already && host) {
+    host.innerHTML = `<div class="czneed">This failure was already raised as <b>${esc(data.already)}</b>.
+      <div class="btnrow" style="margin-top:7px"><button class="sm" data-tragain>Send it again anyway</button></div></div>`;
+    host.querySelector("[data-tragain]").onclick = () => trackerSend(host, test, true);
+    if (button) { button.disabled = false; button.textContent = `Send to ${TRACKER ? TRACKER.name : "…"}`; }
+    return;
+  }
+  if (!data.ok) {
+    banner("err", data.error || "could not send it");
+    if (host) host.innerHTML = `<div class="czneed">${esc(data.error || "It could not be sent.")}
+      <div class="btnrow" style="margin-top:7px"><button class="sm" data-trchange>Connect somewhere else</button></div></div>`;
+    const change = host && host.querySelector("[data-trchange]");
+    if (change) change.onclick = () => trackerForm(host, test);
+    if (button) { button.disabled = false; button.textContent = `Send to ${TRACKER ? TRACKER.name : "…"}`; }
+    return;
+  }
+  banner("ok", data.message);
+  await loadTests();
+  const fresh = $("libList").querySelector(`[data-libhost="${CSS.escape(`${test.suite}|${test.stage}|${test.id}`)}"]`);
+  if (fresh) {
+    fresh.innerHTML = `<div class="czneed" data-trsent>${esc(data.message)}
+      ${data.url ? ` <a href="${esc(data.url)}" target="_blank" rel="noopener">Open it</a>` : ""}
+      ${data.linked ? ' <span class="hint">· kept on this test under Linked</span>' : ""}
+      <div class="btnrow" style="margin-top:7px"><button class="sm" data-trchange>Send somewhere else next time</button></div></div>`;
+    fresh.querySelector("[data-trchange]").onclick = async () => {
+      await api("/api/tracker/forget", { method: "POST" }); TRACKER = null; libRender();
+    };
+  }
+}
+
 /* ------------------------------------------------------------- watching
    The document says what the API should do; only traffic says what it does.
    Point an app at the address given and use it as normal: everything is
@@ -4272,7 +4367,10 @@ function libRender() {
                        : "it has to pass once before it can be shared"}">Share with team</button>` : ""}
           ${out === "fail" ? `<button class="sm" data-libact="bug" data-key="${esc(key)}"
               title="everything a developer needs to reproduce it, ready to paste into a ticket"
-            >Copy bug report</button>` : ""}
+            >Copy bug report</button>
+            <button class="sm" data-libact="send" data-key="${esc(key)}"
+              title="post the same report to where your team tracks work"
+            >${TRACKER ? `Send to ${esc(TRACKER.name)}` : "Send it somewhere…"}</button>` : ""}
           <button class="sm danger" data-libact="delete" data-key="${esc(key)}">Remove</button>
         </div>
         <div data-libhost="${esc(key)}"></div>
@@ -4341,6 +4439,12 @@ function libRender() {
           host.querySelector(".bugtext").textContent = data.markdown;
         }
         banner("ok", "Bug report copied — paste it into your tracker.");
+        return;
+      }
+      if (b.dataset.libact === "send") {
+        const host = $("libList").querySelector(`[data-libhost="${CSS.escape(b.dataset.key)}"]`);
+        if (!TRACKER) { trackerForm(host, { suite, stage, id }); return; }
+        trackerSend(host, { suite, stage, id }, false, b);
         return;
       }
       if (b.dataset.libact === "delete" && !b.dataset.sure) {

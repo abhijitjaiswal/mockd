@@ -1724,15 +1724,10 @@ def list_tests():
     } for s in suites]})
 
 
-@app.get("/api/tests/bug")
-def tests_bug():
-    """The most recent failure of one test, written up for somebody else.
-
-    Looks back through the saved runs rather than taking a job id, so the button
-    works from the list long after the run that failed has scrolled away."""
+def _latest_failure(suite, ident, env):
+    """(title, markdown, ran_at, passed_since) for a test's most recent failed
+    run, or None when there is none on record."""
     import tests as t
-    suite, ident = request.args.get("suite") or "", request.args.get("id") or ""
-    env = request.args.get("env") or ""
     runs = sorted(LOG_DIR.glob("run-*.json"), key=lambda f: f.stat().st_mtime,
                   reverse=True)[:80]
     passed_since = False
@@ -1753,12 +1748,127 @@ def tests_bug():
                     passed_since = True
                     continue
                 title, markdown = t.bug_report(item, suite, report)
-                return jsonify({"ok": True, "title": title, "markdown": markdown,
-                                "ran_at": report.get("ran_at"),
-                                "stale": passed_since})
-    return jsonify({"ok": False, "error":
-                    "No failed run of that test was found"
-                    + (f" on {env}" if env else "") + ". Run it first."}), 200
+                return title, markdown, report.get("ran_at"), passed_since
+    return None
+
+
+@app.get("/api/tests/bug")
+def tests_bug():
+    """The most recent failure of one test, written up for somebody else.
+
+    Looks back through the saved runs rather than taking a job id, so the button
+    works from the list long after the run that failed has scrolled away."""
+    suite, ident = request.args.get("suite") or "", request.args.get("id") or ""
+    env = request.args.get("env") or ""
+    found = _latest_failure(suite, ident, env)
+    if found is None:
+        return jsonify({"ok": False, "error":
+                        "No failed run of that test was found"
+                        + (f" on {env}" if env else "") + ". Run it first."}), 200
+    title, markdown, ran_at, stale = found
+    return jsonify({"ok": True, "title": title, "markdown": markdown,
+                    "ran_at": ran_at, "stale": stale})
+
+
+# ---------------------------------------------------------------------------
+# Where bug reports go
+# ---------------------------------------------------------------------------
+@app.get("/api/tracker")
+def tracker_get():
+    import trackers
+    return jsonify({"connection": trackers.describe(trackers.current())})
+
+
+@app.post("/api/tracker/detect")
+def tracker_detect():
+    """Somebody pasted an address. Say what it is and what else is needed."""
+    import trackers
+    payload = request.get_json(silent=True) or {}
+    try:
+        found = (trackers.as_kind(payload.get("address"), payload["kind"])
+                 if payload.get("kind") else trackers.detect(payload.get("address")))
+    except trackers.Problem as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 200
+    return jsonify({"ok": True, "kind": found["kind"], "name": found["name"],
+                    "what": trackers.KINDS[found["kind"]], "sure": bool(found.get("sure")),
+                    "kinds": trackers.KINDS,
+                    "needs": [{"field": f, "label": label, "secret": secret}
+                              for f, label, secret in trackers.needs_for(found)],
+                    "project_missing": found["kind"] == "jira" and not found.get("project")})
+
+
+@app.post("/api/tracker/connect")
+def tracker_connect():
+    import trackers
+    payload = request.get_json(silent=True) or {}
+    try:
+        found = (trackers.as_kind(payload.get("address"), payload["kind"])
+                 if payload.get("kind") else trackers.detect(payload.get("address")))
+    except trackers.Problem as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 200
+    secrets = payload.get("secrets") or {}
+    lacking = [label for f, label, _ in trackers.needs_for(found) if not secrets.get(f)]
+    if lacking:
+        return jsonify({"ok": False, "error": "It also needs: " + ", ".join(lacking) + "."}), 200
+    if found["kind"] == "jira" and not found.get("project"):
+        return jsonify({"ok": False, "error": "Which Jira project? Paste an address that has the "
+                        "project in it, like …/browse/ABC-1 or …/projects/ABC."}), 200
+    saved = trackers.save(found, secrets)
+    return jsonify({"ok": True, "connection": trackers.describe(saved)})
+
+
+@app.post("/api/tracker/forget")
+def tracker_forget():
+    import trackers
+    trackers.forget()
+    return jsonify({"ok": True})
+
+
+@app.post("/api/tests/bug/send")
+def tests_bug_send():
+    """Send a test's latest failure to the connected tracker, and keep the link
+    it hands back on the test — so the next person sees it was already raised."""
+    import tests as t
+    import trackers
+    payload = request.get_json(silent=True) or {}
+    suite_name, ident = payload.get("suite") or "", payload.get("id") or ""
+    stage, env = payload.get("stage") or "draft", payload.get("env") or ""
+    connection = trackers.current()
+    if connection is None:
+        return jsonify({"ok": False, "error": "Nothing is connected yet.", "connect": True}), 200
+    found = _latest_failure(suite_name, ident, env)
+    if found is None:
+        return jsonify({"ok": False, "error": "No failed run of that test was found"
+                        + (f" on {env}" if env else "") + ". Run it first."}), 200
+    title, markdown, _, _ = found
+
+    suite = next((su for su in t.load_suites(include_drafts=True)
+                  if su.get("name") == suite_name and su.get("_stage", "shared") == stage), None)
+    test = t.find_test(suite, ident)[1] if suite else None
+    sent_before = [link for link in t.links_of(test or {})
+                   if (connection.get("kind") == "jira" and re.fullmatch(r"[A-Z][A-Z0-9_]+-\d+", link))
+                   or (connection.get("kind") in ("github", "gitlab") and "/issues/" in link)]
+    if sent_before and not payload.get("again"):
+        return jsonify({"ok": False, "already": sent_before[-1],
+                        "error": f"This test is already linked to {sent_before[-1]}."}), 200
+    try:
+        result = trackers.send(connection, title, markdown,
+                               {"suite": suite_name, "test": ident, "server": env})
+    except trackers.Problem as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 200
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"It could not be sent: {type(exc).__name__}: {exc}"}), 200
+
+    link = (result.get("key") if connection.get("kind") == "jira" else result.get("url")) \
+        or result.get("url") or result.get("key")
+    if link and test is not None and link not in t.links_of(test):
+        test["links"] = [*t.links_of(test), str(link)]
+        t.save_suite(suite, stage=stage)
+    described = trackers.describe(connection)
+    return jsonify({"ok": True, "url": result.get("url"), "key": result.get("key"),
+                    "linked": bool(link), "to": described["name"],
+                    "message": (f"Sent to {described['name']}"
+                                + (f" as {result['key']}" if result.get("key") else "") + ".")})
 
 
 @app.post("/api/tests/record")

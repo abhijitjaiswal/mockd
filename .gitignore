@@ -47,3 +47,6 @@ demo/endpoints.local.js
 
 # --- decided for your API, not for the tool ----------------------------------
 bindings.json
+
+# --- where your team's bug reports go: yours, not the tool's -----------------
+connections.json
