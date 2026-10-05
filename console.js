@@ -4058,10 +4058,24 @@ function libRender() {
             ${t.status && t.status !== "ready" ? ` · <b>${esc(t.status)}</b>` : ""}
             ${t.owner ? ` · ${esc(t.owner)}` : ""}</div>
         </span>
-        <span class="libres ${out}">${WORD[out]}</span>
+        ${(t.needs || []).length && out !== "pass"
+          ? '<span class="libres wait" title="it cannot pass until somebody gives it a real value">needs a value</span>'
+          : `<span class="libres ${out}">${WORD[out]}</span>`}
         <button class="sm" data-librun="${esc(key)}">Run</button>
       </div>
       ${open ? `<div class="more">
+        ${(t.needs || []).map((name) => `
+          <div class="czneed" data-libneed="${esc(name)}">
+            <b>One thing only you know:</b> a real value for <code>${esc(name)}</code>.
+            Nothing in the API document says where it comes from, so this test cannot pass
+            until it has one.
+            <div class="row" style="margin-top:7px;align-items:end">
+              <div style="flex:1"><input type="text" data-needvalue="${esc(name)}"
+                   placeholder="paste the value" autocomplete="off"></div>
+              <div><button class="sm primary" data-needset="${esc(name)}"
+                   data-key="${esc(key)}">Save</button></div>
+            </div>
+          </div>`).join("")}
         ${t.description ? `<div style="font-size:13px;margin-bottom:8px">${esc(t.description)}</div>` : ""}
         ${t.flow ? `<div class="sub" style="margin-bottom:8px">${(t.steps || []).map((st, i) =>
             `${i + 1}. ${esc(st.name || `${st.method} ${st.path}`)}`).join("<br>")}</div>`
@@ -4095,6 +4109,19 @@ function libRender() {
 
   const parts = (key) => { const [suite, stage, ...rest] = key.split("|");
                            return { suite, stage, id: rest.join("|") }; };
+  $("libList").querySelectorAll("[data-needset]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const name = b.dataset.needset;
+      const box = b.closest(".czneed").querySelector("[data-needvalue]");
+      b.disabled = true;
+      try {
+        const { data } = await api("/api/tests/value", { method: "POST",
+          body: JSON.stringify({ ...parts(b.dataset.key), name, value: box.value.trim() }) });
+        if (!data.ok) { banner("err", data.error || "could not save it"); return; }
+        banner("ok", `${name} saved. Run the test to see how it does.`);
+        await loadTests();
+      } finally { if (b.isConnected) b.disabled = false; }
+    }));
   $("libList").querySelectorAll("[data-libopen]").forEach((el) =>
     el.addEventListener("click", (ev) => {
       if (ev.target.closest("button")) return;

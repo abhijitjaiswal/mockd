@@ -2445,6 +2445,40 @@ def prerequisite_routes(spec, chosen, limit=5, samples=None):
 PLACEHOLDER = re.compile(r"^(<.*>|REPLACE[_ ].*|.*_REQUIRED|TODO.*|CHANGE[_ ].*)$", re.I)
 
 
+def waiting_for(test, suite_data=None):
+    """The values this test still needs from a person.
+
+    When nothing in the API document can supply a value — a warehouse that must
+    already exist, a coupon somebody issued — a test carries it as a placeholder
+    like "<a real warehouse id>". That is honest, and it is also a test that
+    cannot pass yet; this names what it is waiting for, so every screen and
+    every tool can say so instead of reporting an unexplained failure."""
+    own = test.get("data") or {}
+    merged = {**(suite_data or {}), **own}
+    body = json.dumps({k: v for k, v in test.items() if k != "data"}, default=str)
+    used = set(re.findall(r"\{\{\s*([A-Za-z_]\w*)\s*\}\}", body))
+    return sorted(name for name, value in merged.items()
+                  if isinstance(value, str) and PLACEHOLDER.match(value.strip())
+                  and (name in own or name in used))
+
+
+def fill_value(suite, test_id, name, value):
+    """Put a real value where a placeholder was. Returns where it went, or None
+    when this test is not waiting for that name — a value that is already real
+    is somebody's decision, and is not replaced from here."""
+    for test in (suite.get("scenarios") or []) + (suite.get("cases") or []):
+        if test.get("id") != test_id:
+            continue
+        if name not in waiting_for(test, suite.get("data")):
+            return None
+        if name in (test.get("data") or {}):
+            test["data"][name] = value
+            return "test"
+        suite.setdefault("data", {})[name] = value
+        return "suite"
+    return None
+
+
 def _field_holding(node, variable, key=None, in_list=False):
     """Which schema field a {{variable}} fills, and whether it is ONE OF a list.
 

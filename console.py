@@ -1525,11 +1525,13 @@ def list_tests():
                    "method": (c.get("request") or {}).get("method", "GET"),
                    "path": (c.get("request") or {}).get("path", ""),
                    "assertions": len(c.get("assertions") or []),
+                   "needs": t.waiting_for(c, s.get("data")),
                    "history": hist(s["name"], c.get("id"))}
                   for c in (s.get("cases") or [])],
         "scenarios": [{"id": sc.get("id"), "name": sc.get("name"),
                        "kind": sc.get("kind", "api"), "tags": sc.get("tags", []),
                        "levels": t.levels_of(sc), **t.record_of(sc),
+                       "needs": t.waiting_for(sc, s.get("data")),
                        "history": hist(s["name"], sc.get("id")),
                        "steps": [{"name": st.get("name"),
                                   "role": st.get("role"),
@@ -2326,6 +2328,35 @@ def create_try():
     if env != "mock" and env not in _servers_to_try():
         return jsonify({"ok": False, "error": f"{env} is not set up, or is read only"}), 200
     return jsonify(_created_summary(payload.get("suite"), payload.get("ids") or [], env=env))
+
+
+@app.post("/api/tests/value")
+def tests_value():
+    """Give a test the real value it was waiting for."""
+    import tests as t
+    payload = request.get_json(silent=True) or {}
+    name, value = (payload.get("name") or "").strip(), str(payload.get("value") or "").strip()
+    if not value:
+        return jsonify({"ok": False, "error": "Type the value first."}), 200
+    if t.PLACEHOLDER.match(value):
+        return jsonify({"ok": False, "error": "That still looks like a placeholder — "
+                                              "give the real value."}), 200
+    stage = payload.get("stage") or "draft"
+    suite = next((su for su in t.load_suites(include_drafts=True)
+                  if su.get("name") == payload.get("suite")
+                  and su.get("_stage", "shared") == stage), None)
+    if suite is None:
+        return jsonify({"ok": False, "error": "that module is not there"}), 200
+    where = t.fill_value(suite, payload.get("id"), name, t_coerce(value))
+    if where is None:
+        return jsonify({"ok": False, "error": f"this test is not waiting for {name}"}), 200
+    t.save_suite(suite, stage=stage)
+    return jsonify({"ok": True, "message": f"Saved. Run the test to see how it does."})
+
+
+def t_coerce(value):
+    """A number typed into a box is a number."""
+    return _coerce(value)
 
 
 @app.get("/api/mcp/setup")

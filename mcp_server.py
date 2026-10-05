@@ -62,6 +62,10 @@ A good order:
   5. list_tests               so you do not repeat what exists
   6. save_tests               they are validated first; fix what it reports
   7. run_tests                on the mock, then on a real server if one is set up
+If a test needs a value nothing supplies — where_does_this_id_come_from says
+"found": false — declare it in that test's own "data" with a placeholder such as
+"<a real warehouse id>". save_tests and run_tests then report the test as waiting
+for that value. Ask the user for it and pass it on with set_value; never invent it.
 Read the failures run_tests returns and correct the tests before telling the
 user they are done. The mock answers in the documented shape but knows none of
 the API's own rules (totals, stock, what is refused the second time): a test of
@@ -238,7 +242,9 @@ def tool_list_tests(args):
         rows = [{"id": x.get("id"), "name": x.get("name") or x.get("id"),
                  "operations": sorted({f"{(s.get('request') or {}).get('method', 'GET')} "
                                        f"{(s.get('request') or {}).get('path', '')}"
-                                       for s in (x.get("steps") or [x])})}
+                                       for s in (x.get("steps") or [x])}),
+                 **({"waiting_for_a_value": t.waiting_for(x, suite.get("data"))}
+                    if t.waiting_for(x, suite.get("data")) else {})}
                 for x in (suite.get("scenarios") or []) + (suite.get("cases") or [])]
         if len(rows) > 60 and not module:
             rows = rows[:60] + [{"note": f"…and {len(rows) - 60} more; ask for this module by name"}]
@@ -346,8 +352,55 @@ def tool_save_tests(args):
                 touched, notes = touched or changed, notes + said
         if touched:
             t.save_suite(suite, stage="draft")
+    waiting = _waiting(module, ids)
     return {"ok": True, "saved": len(items), "module": module, "ids": ids, "notes": notes,
             "where": "They are in the draft workspace and appear on the console's Tests screen.",
+            **({"waiting_for_a_value": waiting,
+                "next": "These tests cannot pass until each value is real. Ask the user for "
+                        "it — do not invent one — then call set_value. The user can also fill "
+                        "it in on the console's Tests screen."}
+               if waiting else {"next": f'Call run_tests with module "{module}".'})}
+
+
+def _waiting(module, ids=None):
+    """Which tests in a module still hold a placeholder, and for what."""
+    suite = next((su for su in t.load_suites(include_drafts=True)
+                  if su.get("name") == module), None)
+    out = []
+    for test in ((suite or {}).get("scenarios") or []) + ((suite or {}).get("cases") or []):
+        if ids and test.get("id") not in ids:
+            continue
+        for name in t.waiting_for(test, (suite or {}).get("data")):
+            value = {**((suite or {}).get("data") or {}), **(test.get("data") or {})}.get(name)
+            out.append({"test": test.get("id"), "name": name, "placeholder": value})
+    return out
+
+
+def tool_set_value(args):
+    module, name = str(args.get("module") or "").strip(), str(args.get("name") or "").strip()
+    value = args.get("value")
+    if not module or not name or value in (None, ""):
+        raise Problem("Give the module, the name of the value, and the value the user gave you.")
+    if isinstance(value, str) and t.PLACEHOLDER.match(value.strip()):
+        raise Problem("That is still a placeholder. Ask the user for the real value.")
+    suite = next((su for su in t.load_suites(include_drafts=True)
+                  if su.get("name") == module), None)
+    if suite is None:
+        raise Problem(f"There is no module named {module}. See list_tests.")
+    if suite.get("_stage") != "draft":
+        raise Problem(f"{module} is a module the team shares; a person fills its values in the console.")
+    wanted = str(args.get("id") or "").strip()
+    filled = []
+    for test in (suite.get("scenarios") or []) + (suite.get("cases") or []):
+        if wanted and test.get("id") != wanted:
+            continue
+        if t.fill_value(suite, test.get("id"), name, value):
+            filled.append(test.get("id"))
+    if not filled:
+        raise Problem(f"No test in {module} is waiting for {name}. A value that is already real "
+                      f"is not replaced from here — the user changes it in the console.")
+    t.save_suite(suite, stage="draft")
+    return {"ok": True, "filled_in": filled, "still_waiting": _waiting(module),
             "next": f'Call run_tests with module "{module}".'}
 
 
@@ -410,6 +463,14 @@ def tool_run_tests(args):
     on_mock = server == "mock"
     rows = [_explain(item, on_mock)
             for suite in result.get("suites") or [] for item in suite.get("results") or []]
+    waiting = {}
+    for entry in _waiting(module, ids or None):
+        waiting.setdefault(entry["test"], []).append(entry["name"])
+    for row in rows:
+        if row["id"] in waiting and row["outcome"] != "pass":
+            row["waiting_for_a_value"] = waiting[row["id"]]
+            row["why"] = ("This test still holds a placeholder, so this failure says nothing "
+                          "about the API. Ask the user for the value and call set_value.")
     passed = sum(1 for r in rows if r["outcome"] == "pass")
     out = {"server": server, "ran": len(rows), "passed": passed,
            "did_not_pass": len(rows) - passed, "tests": rows}
@@ -472,6 +533,16 @@ TOOLS = [
               "about": {"type": "string",
                         "description": "A few words on what these test, used to name the module."}},
              ["tests"])),
+    ("set_value", tool_set_value,
+     "Fill in a value only the user knows, for tests that are waiting on one (see "
+     "waiting_for_a_value in save_tests, run_tests and list_tests). Only replaces a "
+     "placeholder; a value that is already real is left alone. Use the value the user gave "
+     "you — never one you made up.",
+     _schema({"module": {"type": "string"},
+              "name": {"type": "string", "description": "The name being waited for."},
+              "value": {"description": "The real value, exactly as the user gave it."},
+              "id": {"type": "string", "description": "Only this test (optional)."}},
+             ["module", "name", "value"])),
     ("run_tests", tool_run_tests,
      "Run a module's tests on the mock or a named server and get each result, with the failing "
      "step, the checks that failed and the response. Read these and fix the tests.",

@@ -92,7 +92,7 @@ function introduce(command, args) {
         !!answers && ((answers[0] || {}).result || {}).serverInfo && answers[0].result.serverInfo.name === "mockd",
         JSON.stringify(answers).slice(0, 200));
   check("and offers its tools",
-        !!answers && (((answers[1] || {}).result || {}).tools || []).length === 9,
+        !!answers && (((answers[1] || {}).result || {}).tools || []).length === 10,
         JSON.stringify((answers || [])[1] || {}).slice(0, 200));
 
   await p.locator("#czMcpBack").click();

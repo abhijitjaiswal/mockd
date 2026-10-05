@@ -1373,7 +1373,7 @@ def group_mcp():
                    "find_operations" in (hello.get("instructions") or ""))
         ask("notifications/initialized", notify=True)
         tools = ask("tools/list")["result"]["tools"]
-        check("mcp: nine tools", len(tools), 9)
+        check("mcp: ten tools", len(tools), 10)
         check_true("mcp: each with a description and an input schema",
                    all(tool.get("description") and tool.get("inputSchema", {}).get("type") == "object"
                        for tool in tools))
@@ -1419,7 +1419,37 @@ def group_mcp():
     check("mcp: it ends cleanly when the client goes away", proc.returncode, 0)
 
 
+def group_needs():
+    """A value only a person knows: named while missing, filled once, never guessed."""
+    import tests as t
+
+    test = {"id": "x", "data": {"depotId": "<a real depot id>", "note": "plain"},
+            "request": {"method": "GET", "path": "/depots/{{depotId}}"}, "assertions": []}
+    check("needs: a placeholder the test holds is named", t.waiting_for(test), ["depotId"])
+    shared = {"id": "y", "request": {"method": "GET", "path": "/depots/{{depotId}}"},
+              "assertions": []}
+    check("needs: so is one it uses from the module's data",
+          t.waiting_for(shared, {"depotId": "TODO fill in", "unused": "<nobody uses this>"}),
+          ["depotId"])
+    check("needs: a real value is not waited for",
+          t.waiting_for({**test, "data": {"depotId": "D-7"}}), [])
+
+    suite = {"name": "m", "data": {"region": "<a real region>"},
+             "cases": [test, {"id": "z", "request": {"method": "GET", "path": "/r/{{region}}"},
+                              "assertions": []}], "scenarios": []}
+    check("needs: filling goes to the test that declared it",
+          t.fill_value(suite, "x", "depotId", "D-7"), "test")
+    check("needs: and is there afterwards", suite["cases"][0]["data"]["depotId"], "D-7")
+    check("needs: a value that is already real is not replaced",
+          t.fill_value(suite, "x", "depotId", "D-8"), None)
+    check("needs: nor one the test never asked for", t.fill_value(suite, "x", "note", "n"), None)
+    check("needs: a module-level placeholder is filled at module level",
+          t.fill_value(suite, "z", "region", "north"), "suite")
+    check("needs: and the module holds it", suite["data"]["region"], "north")
+
+
 GROUPS = {
+    "needs": group_needs,
     "mcp": group_mcp,
     "plain_rest": group_plain_rest,
     "classification": group_classification,

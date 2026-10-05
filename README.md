@@ -26,6 +26,8 @@ Three programs, one spec:
 | `SPEC_GUIDE.md` | the authoring standard for whoever owns the API — plain OpenAPI, graded live |
 | `speclock.py` | pins which document the results are about, so a spec swap can't be silent |
 | `tests.py` | saved, replayable assertions — cases, scenarios, and the runner CI calls |
+| `blueprint.py` | the baseline: tests derived from the document, so every endpoint is checked before anyone writes one |
+| `mcp_server.py` | mockd as tools an AI assistant can call, so it can write and run tests itself |
 
 ## Setup
 
@@ -90,15 +92,20 @@ python console.py                  # then open http://localhost:4100
 
 ### First run
 
-A fresh clone ships `sample_spec.yaml`, a four-operation example, so everything
-works before you supply anything. To point it at your own API:
+A fresh clone ships `sample_spec.yaml`, a four-operation example, so there is
+something to look at before you supply anything. The console opens on **Home**,
+which always says the one thing to do next. To point it at your own API:
 
-1. **Source → Fetch from a Swagger URL** — paste your `/openapi.json`, or the
-   documentation page URL; it will follow the page to the document behind it.
-2. **Source → The project spec** — choose the document you just fetched. That
-   one setting is what the mock, the contract check, the tests, coverage and
-   the Postman export all use.
-3. **Server → Start** — the mock comes up on port 4010.
+1. **Add your API document.** Paste a link — your `/openapi.json`, or the
+   address of the Swagger page; it follows the page to the document behind it —
+   or choose a file. **Load** shows what was found; nothing is replaced until
+   you press **Use this document**.
+2. **Start the mock.** It comes up on port 4010 on that document, checks itself
+   against it, and a baseline of tests is made for you.
+3. **Run the baseline.** Every endpoint, checked against what the document says.
+
+Then add your dev or staging server under **Servers** and run the same tests
+there, and describe what else you want proven under **Create tests**.
 
 From the command line instead:
 
@@ -118,8 +125,10 @@ python mockd.py --spec https://api.dev.example.com/openapi.json \
                 --header 'Authorization: Bearer ...' --poll 30
 ```
 
-CORS is open. `mock_overlay.json` is picked up automatically if it sits next to
-the spec.
+CORS is open, including the permission request a browser sends before a
+cross-origin write and requests made with credentials, so an app on another
+port can call the mock as it would the real API. `mock_overlay.json` is picked
+up automatically if it sits next to the spec.
 
 ### What is not in this repository
 
@@ -273,28 +282,26 @@ serve its own UI: the page spawns a process on this machine and calls
 `http://localhost:<port>`, and every request it sends goes through the console
 server, so the browser only ever makes same-origin calls.
 
-| panel | what it does |
+Five screens do the work, and each opens on the simple thing with the technical
+tools folded under **Advanced**:
+
+| screen | what it is for |
 |---|---|
-| **Server** | spec (file or URL), overlay, port, stateful / require-auth / undocumented-status / array size — then Start, Stop, Restart |
-| **Spec coverage** (top band) | how many operations are fully documented, partial, or have no response shape at all — with a per-dimension breakdown and an expandable list naming each gap. Reads the spec directly, so it works before you start anything |
-| **Coverage** | how many operations are curated vs synthesised, the spec generation counter, and what changed on the last reload |
-| **Operations** | every route the mock is serving, filterable, each tagged with the layer its body comes from; click one to load it into the tester |
-| **Request** | method, path, query, headers and body, with one-click `X-Mock-*` headers (force 404/500, empty list, full page, all nulls, slow) and **Copy as cURL** |
-| **Operations** | a per-row **curl** button, plus **Download Postman collection** for all 96 at once |
-| **Response** | status, timing, size, `X-Mock-Source`, and the pretty-printed body |
-| **Check a real environment** | base URL + token, to run the same spec against the deployed backend — read-only unless you tick the writes box |
-| **Recent requests** | the mock's own request log, including validation violations |
+| **Home** | where things stand — document, mock, baseline, your tests, servers — and the one thing to do next, with a button that does it |
+| **Create tests** | say what you want tested in a sentence; tests come back validated, saved and already tried |
+| **Tests** | every test in one list: search, filter by module, type, priority or result, pick a server, run; a failing row has **Copy bug report** |
+| **API document** | which document is in use, and one box to bring in another from a link or a file |
+| **Servers** | the mock and your real servers; **Add a server** asks for a name, an address and how you sign in, then tests the connection |
 
-Three buttons do the heavy lifting:
+Under **More**: *Try a request* (fire one request at the mock, with sample and
+deliberately broken bodies), *Spec coverage* and *Spec quality* (how much the
+document really says), *Use the mock in an app*, and *Mock settings* (port,
+overlay, stateful, auth simulation).
 
-- **Fill sample body** generates a valid request body from the operation's schema,
-  so you start from something that passes rather than a blank box.
-- **Break the body** empties the first string field and puts a number in the
-  second, so you can watch the mock reject it field by field.
-- **Self-check the mock** runs `verify.py` against the mock that is currently
-  running — the mock checking its own answers against the spec, writes included.
-  The separate **Check a real environment** panel points the same verifier at a
-  deployed backend instead.
+When the mock starts it runs `verify.py` against itself — the mock checking its
+own answers against the document, writes included — and shows the result beside
+"running". Everything downstream assumes the mock is faithful, so that is
+established first rather than discovered later.
 
 `CONSOLE_PORT=4200 python console.py` moves it off 4100. Closing the console
 stops the mock it started.
@@ -581,7 +588,7 @@ python tests.py run --env dev --tag smoke      # one label, every section
 python tests.py run --env dev --kind e2e       # the sanity flows
 ```
 
-The Tests view has the same filter as chips above the list. `tests/README.md`
+The Tests screen filters by the same things above its list. `tests/README.md`
 has the full layout.
 
 ### Draft first, shared when proven
@@ -608,13 +615,87 @@ Every run records its outcome per test, so the console shows `pass` / `fail` /
 test that has passed. Nothing is frozen: **edit** opens the full definition to
 change assertions, add or reorder scenario steps, or rename; **del** removes it.
 
+### The baseline: tests nobody writes
+
+As soon as the mock is running on the project's document, `blueprint.py`
+derives a suite called `baseline` from it:
+
+| kind | what it checks | priority |
+|---|---|---|
+| contract | every read that needs no id answers with the documented status and shape | P0 |
+| lifecycle | each resource can be created, read back, changed, found in its list and removed — every step held to its documented shape | P1 |
+| omission | a request missing a required field is refused, as documented | P2 |
+| missing | asking for an id nothing has is answered with 404, where the document says so | P2 |
+| parameter | a query parameter outside its documented range is refused | P3 |
+
+Ids a request needs are captured from the API itself — a book's id from the
+list of books — never invented. Regenerating never overwrites work: a generated
+test somebody edited is theirs from then on, and is kept. A not-found check is
+kept only where the mock itself answers 404, so the baseline can always pass
+on the mock; run it there first, then on any real server.
+
+```bash
+python tests.py run --env mock --drafts --suite baseline
+python tests.py run --env dev  --drafts --suite baseline
+```
+
+### A test is a record, not only something to run
+
+Each test carries a **priority** (`P0` must never break … `P3` edges), a
+**status** (`ready`, `blocked`, `retired` — retired tests are kept and never
+run), an **owner**, **links** (a ticket key, a URL) and a one-sentence
+**description**. All of it is edited from the Tests list without opening the
+steps, shows in the HTML report, and steers runs:
+
+```bash
+python tests.py run --env dev --priority P0 --priority P1
+```
+
+### From a sentence to tests
+
+**Create tests** takes what you want proven, in your own words, and offers who
+writes it: Claude or Codex on this machine if either is installed; any AI tool
+of your own, through a prompt to copy and an answer to paste back; or an AI
+tool connected directly ([MCP](#letting-an-ai-tool-write-the-tests-mcp)). The
+prompt is built from the document — the endpoints the sentence is about, every
+field and limit, and where each id comes from. A request that is not about
+this API is refused rather than answered with invented endpoints.
+
+What comes back is validated, saved as drafts, and tried on the mock at once,
+with each result in plain words. The mock answers in the documented shape but
+knows none of the API's own rules — what a total comes to, what is refused the
+second time — so where a failure may be the mock's ignorance rather than the
+test's fault, the screen says so and offers **Try them on** a real server.
+
+### A value only you know
+
+Sometimes nothing in the API can supply a value a test needs — a warehouse that
+must already exist, a coupon somebody issued. The test then carries it as a
+placeholder, such as `<a real warehouse id>`, rather than an invented value
+that would fail for no visible reason. Such a test is marked **needs a value**
+in the Tests list; open it, type the value, **Save**. The Create tests review
+screen asks for it the same way, and an assistant connected over MCP is told
+which tests are waiting and for what, so it asks you instead of making one up.
+A value that differs per server belongs in that server's test data
+(Servers → Advanced), which wins over the test's own at run time.
+
+### A failure as a bug report
+
+A failing row in the Tests list has **Copy bug report**: what was expected,
+what happened, which side the evidence points at, the steps, the failing
+request as a `curl` that can be re-run, and the response. It is plain Markdown
+for any tracker, and it never contains a token, cookie or password.
+
+**Download report** gives the whole run as HTML to read or send, JUnit XML for
+a CI server, or JSON for a script.
+
 ### Generated tests, and the door they come through
 
 Tests will increasingly arrive as pasted JSON — from a teammate, a script, or an
 assistant. The design accounts for that rather than bolting it on later:
 
 **One validated entry point.** `tests.py import` and the console's
-**Import / paste tests…** accept a single test, an array, or a whole suite, and
+**Import / paste…** (Tests → Advanced tools) accept a single test, an array, or a whole suite, and
 check every field before anything is written. Plausible-looking output fails
 loudly instead of silently evaluating to false at runtime:
 
@@ -656,9 +737,9 @@ grammar, the validator, the draft quarantine and the promotion gate all stay.
 
 Every layer answers it, because an outcome without a target is not a result.
 
-**Before** — the Explore view has a **Send to** selector (the mock, or any
+**Before** — *Try a request* (under More) has a **Send to** selector (the mock, or any
 defined environment) and warns in place when it is pointed at a real one.
-The Tests view has **Against**.
+The Tests screen has **Run on**.
 
 **During** — a run in the console is a background job: each operation appears as
 its own row the moment it answers, with a `n / total` counter, elapsed seconds,
@@ -743,6 +824,7 @@ order" — and it works through these itself:
 | `list_servers` | where tests can run — names and addresses only |
 | `validate_tests` | every problem with its tests, without saving |
 | `save_tests` | validates, then adds them to the draft workspace |
+| `set_value` | fills in a value only the user knows, where a test is waiting on one |
 | `run_tests` | each result on the mock or a named server, with the failing step and response |
 
 What it cannot do, by construction: see a token, password or cookie (a server
@@ -807,28 +889,27 @@ python postman.py --spec apis.json --env dev     # also writes dev.postman_envir
 resolved from the shell, from `.env`, or from `environments.local.json` — the
 last two are gitignored.
 
-**Setting them from the console.** The Environments view has a **Configure**
-button per environment. It lists exactly what that environment still needs, says
-what each value is for, masks the secret ones, and writes to `.env`:
+**Setting them from the console.** The **Servers** screen lists the mock and
+your servers, each with its state in words — *Ready*, *Connected*, or *Needs a
+password, a username*. **Add a server** asks for a name, an address, how you
+sign in (nothing, a cookie from your browser, a token, or a username and
+password) and whether it is read only, then signs in and makes one real call,
+so a wrong credential is caught there rather than halfway through a run.
 
-```
-DEV_BASE_URL      not set   the root of the API, e.g. https://api.dev.example.com
-DEV_USERNAME      not set   the account the tests log in as
-DEV_PASSWORD      not set   its password — stored only in .env, which is gitignored
-DEV_DEPARTMENT_ID not set   the id of a row that exists on that server
-```
+What you type is written to `.env`, which is gitignored; `environments.json`
+gets only the *shape* — `${DEV_BASE_URL}`, `${DEV_TOKEN}` — so it is safe to
+commit and share. Values already set are never sent back to the browser.
+`.env` is read when a value is needed, so nothing restarts.
 
-**Save & test login** writes the values and immediately performs the
-environment's login, so a wrong password is caught there rather than halfway
-through a sweep. Values already set are never sent back to the browser — only
-whether they resolve. `.env` is read when a value is needed, so nothing
-restarts. So the committed file holds the *shape* of an
-environment and `environments.py list` tells you exactly what is missing:
+The file ships with only the mock in it. Your team's servers are added from
+the Servers screen, or kept on one machine in `environments.local.json`
+(`environments.local.example.json` shows one in full). The mock's own address
+is `${MOCK_BASE_URL}`, which resolves by itself to the port the mock was last
+started on — start it on 4020 and tests "on the mock" go to 4020.
 
 ```
 dev          ${DEV_BASE_URL}                 auth=login  [unresolved: DEV_BASE_URL, DEV_PASSWORD, DEV_USERNAME]
 mock         http://localhost:4010           auth=none
-staging      ${STAGING_BASE_URL}             auth=token  [unresolved: STAGING_BASE_URL, STAGING_TOKEN]
 ```
 
 Three ways to authenticate:
@@ -882,7 +963,7 @@ python verify.py --spec apis.json --base-url http://localhost:4010
 
 **Live check — does the deployed backend answer the same spec?** Read-only
 unless you ask otherwise, because here a POST creates a row somebody owns. It is
-the console's **Check a real environment** panel, or:
+**Check a real environment** (Servers → Advanced), or:
 
 ```bash
 python verify.py --spec apis.json --base-url https://api.dev.example.com \
@@ -946,7 +1027,17 @@ python mockd.py --spec apis.json --stateful
 ```
 
 `POST` creates, `GET /…/{id}` returns it, `PUT/PATCH` update, `DELETE` removes,
-missing ids 404 — so create → verify → cleanup flows work against the mock.
+missing ids 404 — so create → verify → cleanup flows work against the mock. The
+console starts the mock this way.
+
+It does not invent: what you create is what you read back. A created row is
+given the fields the document requires and a server would add itself — an id, a
+`created_at` — once, and keeps them. An id that refers to nothing is answered
+with the documented 404 (in a path) or 422 (in a body), and documented query
+filters are honoured, so a test that passes here is not passing on the mock's
+imagination. Every answer is checked against the operation's own schema first;
+where a stored row would not validate, the mock falls back to the documented
+sample rather than serve the wrong shape.
 
 It understands this API's verb-in-path shape: `/api/v1/account/create`,
 `/api/v1/account/list`, `/api/v1/account/read/{id}`, `/api/v1/account/update/{id}` and
@@ -985,6 +1076,7 @@ validation violations, the status and the body source.
 python build_overlay.py --check                          # overlay drift
 python verify.py --spec apis.json --base-url http://localhost:4010   # mock self-check
 python tests.py run --base-url http://localhost:4010     # the saved suites
+python selftest.py                                       # the code itself, no server needed
 ```
 
 All four are what CI runs, and all four are green: 96/96 operations answer,
@@ -1007,13 +1099,20 @@ mock_overlay.json    the editable payloads (315 response bodies across 96 operat
 verify.py            contract verification against a live API
 postman.py           spec -> Postman collection (importable, newman-runnable)
 tests.py             saved assertions: cases, scenarios, runner, promotion
+blueprint.py         the baseline suite, derived from the document
+bindings.py          where each id comes from: which call returns it, and the path
+verdict.py           whose problem a failure looks like, with the evidence
+project.py           which document the project is about (mockd.json)
+speclock.py          pins the agreed version of the document; specdiff.py compares two
+selftest.py          checks of the code itself — python selftest.py
+demo/                browser suites that click through the console (Playwright)
 tests/               shared suites — committed, run by CI
 tests/drafts/        the draft workspace — gitignored, yours until proven; also
                      where imported and generated tests land
 .github/workflows/   ready-to-copy GitHub Actions pipeline
 ci/gitlab-ci.yml     the same for GitLab
 environments.py      named targets: base URL + how to authenticate
-environments.json    the committed shapes — ${VAR} placeholders, never secrets
+environments.json    the committed shapes — ${VAR} placeholders, never secrets; ships with the mock only
 environments.local.example.json   copy to environments.local.json (gitignored) for real values
 smoke_test.sh        end-to-end walkthrough
 sample_spec.yaml     a tiny REST spec, for checking mockd against a non-FastAPI shape
@@ -1044,21 +1143,23 @@ what is still open:
 - Synthesised payloads are *inferred*. Right far more often than not, but a guess
   until the owning team confirms them — which is what the `guess` status and
   `/_mock/drift` are for.
-- **No unit tests for the code itself.** Everything is verified by running it
-  end-to-end (see below), which catches integration faults well and edge cases in
-  individual functions less well.
-- `--require-auth` checks for the presence of an `Authorization` header; it does
-  not verify tokens or model per-role permissions.
-- Stateful mode is in-memory — a restart wipes it. Use `POST /_mock/reset`
-  deliberately instead.
-- Stateful mode keeps one collection per resource, so an API whose list item and
-  detail shapes differ (`/positions/mappings` lists `PositionMappingOut`,
-  `/positions/mappings/{id}` documents `PositionOut`) cannot serve both from the
-  store. The store checks its answer against the documented schema and defers to
-  the spec/overlay when it would not validate.
-- Synthesised payloads are *inferred*. They are the right shape far more often
-  than not, but they are a guess until the owning team confirms them — which is
-  exactly what the `synthesized` flag in the overlay and `/_mock/drift` are for.
+- **The mock knows the document, not the business.** It answers in the right
+  shape with the right statuses, but it does not compute a total, track stock
+  or refuse something the second time. A test of such a rule can only be
+  settled on a real server; the console says so when that is the likely reason
+  for a failure.
+- **Some not-found checks are left out of the baseline.** Where the mock serves
+  a read from a hand-written sample it answers every id with that sample, so a
+  "404 for an id nothing has" check could never pass there and is not
+  generated — though it would be valid against a real server.
+- **"Is this request about this API?" is decided by words.** A request that
+  shares a resource's name by accident — "book a flight" against an API of
+  books — is let through; the endpoints offered will plainly not fit.
+- **An assistant connected over MCP can run tests on any server that is set
+  up**, including ones it may write to. It never sees a credential and read-only
+  servers stay read only, but there is no per-server allow-list for it.
+- The browser suites under `demo/` need Playwright (`cd demo && npm install`)
+  and a running console; they are not part of the CI templates.
 
 ## Licence
 
