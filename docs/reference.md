@@ -1108,6 +1108,12 @@ verdict.py           whose problem a failure looks like, with the evidence
 project.py           which document the project is about (mockd.json)
 speclock.py          pins the agreed version of the document; specdiff.py compares two
 selftest.py          checks of the code itself — python selftest.py
+impact.py            what a changed document does to the tests; the pull-request gate
+recorder.py          passes an app's traffic through to a real server and records it
+observe.py           where recorded traffic and the document disagree; a recording as a test
+trackers.py          sends a bug report to Jira, GitHub, GitLab, Slack, Teams or a webhook
+perf.py              slow and slowing endpoints from ordinary runs; a small load run
+apimap.py            every endpoint with what is known about it, for the map on Home
 demo/                browser suites that click through the console (Playwright)
 docs/recordings/     the two recordings shown at the top of this file
 tests/               shared suites — committed, run by CI

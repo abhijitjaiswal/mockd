@@ -4159,7 +4159,10 @@ function mapLayout(resources) {
     for (const c of row) placed.push({ ...c, cx: c.cx + shift, cy: y + tall });
     y += tall * 2 + 46;
   }
-  return { placed, height: Math.max(300, y + 4) };
+  // a small API should sit level with the centre, not hang from the top
+  const height = Math.max(300, y + 4), down = Math.max(0, (height - (y + 4)) / 2);
+  for (const c of placed) c.cy += down;
+  return { placed, height };
 }
 
 function mapRender(d, animate) {

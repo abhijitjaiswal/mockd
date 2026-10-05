@@ -31,6 +31,29 @@ matching what was agreed.
 - **One screen that says what to do next.** Home shows where things stand —
   document, mock, tests, servers — and the next step, with a button for it.
 
+## What it notices by itself
+
+Nobody has to ask for any of these. They appear on Home when there is
+something to say, each with the one thing to do about it.
+
+- **The contract changed.** Load a new version of the document and it says,
+  before you use it, what would break and which of your tests use what changed.
+  In a pull request the same check fails the build on a breaking change.
+- **The real API and the document disagree.** Point your app at mockd's
+  pass-through address, or load a recording from your browser. It finds
+  endpoints the document does not have, statuses it does not mention, and
+  fields that are missing, mistyped or undocumented — and turns what you
+  clicked through into a test.
+- **An endpoint is open.** Every protected endpoint is called without signing
+  in and expected to refuse. One that answers anyway is flagged first.
+- **Something got slow.** From the timings of ordinary runs: endpoints that
+  take over a second, and ones that became slower than they used to be.
+- **A test cannot pass yet.** It is waiting for a value only you know.
+
+All of it lands on one **map of the API**: every endpoint a dot, coloured by
+what is known about it on the server you choose, with the calls going out
+live when the tests run.
+
 ## What it supports
 
 | | |
@@ -41,7 +64,10 @@ matching what was agreed.
 | **Tests** | single checks and multi-step flows; smoke, sanity, regression, negative and performance; priority P0–P3; owner, status and ticket links; grouped by module |
 | **AI tools** | Claude Code, Claude Desktop and Cursor directly (MCP); any chat AI through a prompt to copy and paste; Claude or Codex on your machine. None is required |
 | **Reports** | HTML to read or send, JUnit XML for CI, JSON for scripts, Markdown bug reports |
-| **CI** | ready-made pipelines for GitHub Actions and GitLab |
+| **Bug trackers and chat** | send a bug report to Jira (Cloud or self-hosted), GitHub or GitLab issues, Slack, Teams or any webhook — connected by pasting its address |
+| **Real traffic** | live pass-through to a real server, or a `.har` file saved from a browser |
+| **Performance** | repeat the read-only tests with several callers at once; median and 95th/99th percentile per endpoint; a budget as a CI gate |
+| **CI** | ready-made pipelines for GitHub Actions and GitLab, including a gate on breaking contract changes |
 | **Postman** | export the API as a collection; import an existing collection as tests |
 | **Runs on** | macOS, Linux and Windows, with Python 3.9 or newer |
 
@@ -103,6 +129,8 @@ Everything the console does is a command, which is what CI runs.
 python tests.py run --env mock --drafts                  # every test, on the mock
 python tests.py run --env dev --priority P0 --junit report.xml
 python verify.py --spec specs/your-api.json --env dev    # does the real API match the document?
+python impact.py --against origin/main --fail-on-breaking   # what a pull request changes in the contract
+python perf.py run --env dev --users 5 --seconds 20 --p95 500   # under load, with a budget
 python selftest.py                                       # mockd's own checks
 ```
 
@@ -115,7 +143,11 @@ python selftest.py                                       # mockd's own checks
 - **The mock forgets on restart.** Its data is held in memory.
 - **Sign-in is not simulated in depth.** The mock can require a token to be
   present; it does not check scopes or roles.
-- **No ticket-system integration yet.** Bug reports are Markdown to paste.
+- **Tracker connections are untested against live accounts.** Jira, GitHub,
+  GitLab, Slack and Teams are spoken to as their documentation describes and
+  have been exercised against local stand-ins only.
+- **Load runs are small.** Up to fifty callers for five minutes — enough to
+  catch a regression, not to simulate thousands of users.
 - **One machine.** It runs locally for one person; there is no hosted,
   multi-user version.
 
