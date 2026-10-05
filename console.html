@@ -367,6 +367,10 @@
             margin-bottom:11px;background:var(--bg)}
   .stepedit h5{margin:0 0 7px;font-size:12px;font-weight:650;display:flex;gap:8px;
                align-items:center}
+  .mcpway{border:1px solid var(--line);border-radius:8px;padding:11px 14px;margin:10px 0}
+  .mcpway .hd{display:flex;gap:10px;align-items:center}
+  .mcpway .hd b{font-size:13.5px}
+  .mcpway pre{margin:8px 0 0;max-height:210px;overflow:auto;font-size:12px}
   .docpick{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
   .docpick input[type=text]{flex:1 1 320px;max-width:560px}
   .docnow b{font-size:15px}
@@ -850,6 +854,9 @@
 
           <label class="czbig" style="margin-top:16px">Who should write the tests?</label>
           <div id="czWriters" class="czwriters"></div>
+          <p class="hint" style="margin:9px 0 0">Or connect your AI tool to mockd once and
+            ask it for tests in its own window — nothing to copy and paste.
+            <button class="sm" id="czMcpOpen" style="margin-left:6px">Show me how</button></p>
 
           <details style="margin-top:10px">
             <summary style="cursor:pointer;font-size:12px">Options</summary>
@@ -862,6 +869,21 @@
             <button class="primary" id="czGo">Create tests</button>
             <span class="hint" id="czGoNote"></span>
           </div>
+        </div>
+
+        <!-- connect an AI tool directly, once -->
+        <div id="czMcp" hidden>
+          <p class="czbig">Connect your AI tool to mockd</p>
+          <p class="hint">Do this once. After that, ask your AI tool in its own window —
+            “write tests for cancelling an order” — and it looks up what it needs here,
+            saves the tests and runs them itself. mockd contains no AI and needs no key:
+            your tool does the thinking.</p>
+          <div id="czMcpWays"></div>
+          <p class="hint">Your AI tool is given endpoint names, field names, sample answers
+            from the mock, and what came back when a test it ran failed. It is never given a
+            token, password or cookie; it can add tests but cannot change or remove any; and
+            a server marked read only stays read only.</p>
+          <div class="btnrow"><button class="sm" id="czMcpBack">Back</button></div>
         </div>
 
         <!-- 2 · write, by an assistant on this machine -->

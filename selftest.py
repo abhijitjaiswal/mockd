@@ -1330,7 +1330,97 @@ def group_plain_rest():
           (v.attribute(item) or {}).get("kind"), v.BACKEND_BROKE)
 
 
+def group_mcp():
+    """The MCP server, spoken to over stdin and stdout as a client would.
+
+    Read-only calls against the built-in sample document, so nothing here
+    touches anybody's tests."""
+    import json as _json
+    import os
+    import subprocess
+    from pathlib import Path
+
+    here = Path(__file__).resolve().parent
+    proc = subprocess.Popen(
+        [sys.executable, str(here / "mcp_server.py")], text=True, cwd=str(here),
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env={**os.environ, "MOCKD_SPEC": "sample_spec.yaml"})
+    lines, count = [], [0]
+
+    def ask(method, params=None, notify=False):
+        message = {"jsonrpc": "2.0", "method": method, "params": params or {}}
+        if not notify:
+            count[0] += 1
+            message["id"] = count[0]
+        proc.stdin.write(_json.dumps(message) + "\n")
+        proc.stdin.flush()
+        if notify:
+            return None
+        line = proc.stdout.readline()
+        lines.append(line)
+        return _json.loads(line)
+
+    def call(name, **arguments):
+        result = ask("tools/call", {"name": name, "arguments": arguments})["result"]
+        return _json.loads(result["content"][0]["text"]), result["isError"]
+
+    try:
+        hello = ask("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
+                                   "clientInfo": {"name": "selftest", "version": "0"}})["result"]
+        check("mcp: it answers in the protocol version the client asked for",
+              hello.get("protocolVersion"), "2024-11-05")
+        check_true("mcp: and says how it is meant to be used",
+                   "find_operations" in (hello.get("instructions") or ""))
+        ask("notifications/initialized", notify=True)
+        tools = ask("tools/list")["result"]["tools"]
+        check("mcp: nine tools", len(tools), 9)
+        check_true("mcp: each with a description and an input schema",
+                   all(tool.get("description") and tool.get("inputSchema", {}).get("type") == "object"
+                       for tool in tools))
+        check_true("mcp: none that deletes or overwrites",
+                   not any(w in tool["name"] for tool in tools for w in ("delete", "remove")))
+        check("mcp: an unknown method is a protocol error, not a crash",
+              (ask("no/such/method").get("error") or {}).get("code"), -32601)
+
+        fmt, _ = call("get_test_format")
+        check_true("mcp: the test format includes the rules", "RULES" in fmt.get("format", ""))
+        found, _ = call("find_operations", request="create an order and read it back")
+        check_true("mcp: a request finds operations of this API",
+                   any("/orders" in o["operation"] for o in found.get("operations") or []),
+                   str(found)[:200])
+        away, _ = call("find_operations", request="book a flight to Paris")
+        check("mcp: a request about something else finds none", away.get("operations"), [])
+        op = (found.get("operations") or [{}])[0].get("operation")
+        got, failed = call("get_operation", operation=op)
+        check_true("mcp: an operation's contract is returned", not failed and bool(got.get("contract")))
+        nope, failed = call("get_operation", operation="GET /definitely/not/here")
+        check_true("mcp: one that is not in the document is refused",
+                   failed and "not in the API document" in nope.get("error", ""))
+        bad, _ = call("validate_tests", tests=[{
+            "id": "t", "request": {"method": "GET", "path": "http://elsewhere.example/x"},
+            "assertions": [{"type": "status", "equals": 200}]}])
+        check("mcp: a test that names a host is not valid", bad.get("ok"), False)
+        ghost, _ = call("validate_tests", tests=[{
+            "id": "t", "request": {"method": "GET", "path": "/definitely/not/here"},
+            "assertions": [{"type": "status", "equals": 200}]}])
+        check_true("mcp: nor one for an endpoint the document does not have",
+                   ghost.get("ok") is False and "not an operation" in " ".join(ghost.get("problems") or []))
+        shown, _ = call("list_servers")
+        check_true("mcp: servers are listed by name and address, nothing more",
+                   all(set(sv) <= {"name", "address", "ready", "read_only", "is_the_mock",
+                                   "not_ready_because"} for sv in shown.get("servers") or [{}]))
+        where, failed = call("run_tests", module="no-such-module")
+        check_true("mcp: running a module that does not exist is refused", failed)
+        check_true("mcp: every line it wrote was one JSON message",
+                   all(_json.loads(line).get("jsonrpc") == "2.0" for line in lines))
+    finally:
+        proc.stdin.close()
+        proc.wait(timeout=10)
+    check("mcp: it ends cleanly when the client goes away", proc.returncode, 0)
+
+
 GROUPS = {
+    "mcp": group_mcp,
     "plain_rest": group_plain_rest,
     "classification": group_classification,
     "taxonomy": group_taxonomy,

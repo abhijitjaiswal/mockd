@@ -2328,6 +2328,39 @@ def create_try():
     return jsonify(_created_summary(payload.get("suite"), payload.get("ids") or [], env=env))
 
 
+@app.get("/api/mcp/setup")
+def mcp_setup():
+    """What somebody pastes into their AI tool to connect it to this project.
+
+    Each way is given twice: as shown, with the home folder written as ~ so a
+    screen share does not carry the account's name, and as copied, with the
+    full path — an AI tool's settings file does not expand ~."""
+    python, server = sys.executable, str(HERE / "mcp_server.py")
+    home = str(Path.home())
+
+    def short(text):
+        return text.replace(home, "~")
+
+    def quoted(text):
+        return f'"{text}"' if " " in text else text
+
+    command = f"claude mcp add mockd -- {quoted(python)} {quoted(server)}"
+    config = json.dumps({"mcpServers": {"mockd": {"command": python, "args": [server]}}},
+                        indent=2)
+    return jsonify({
+        "available": (HERE / "mcp_server.py").exists(),
+        "ways": [
+            {"tool": "Claude Code", "how": "Run this once in a terminal.",
+             "shown": short(command), "copy": command},
+            {"tool": "Claude Desktop",
+             "how": "Settings → Developer → Edit Config. Add this, save, and restart the app.",
+             "shown": short(config), "copy": config},
+            {"tool": "Cursor",
+             "how": "Settings → MCP → Add new MCP server, and paste this.",
+             "shown": short(config), "copy": config},
+        ]})
+
+
 @app.get("/api/create/context")
 def create_context():
     """What the Create screen needs to greet somebody: what can write tests

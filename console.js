@@ -4180,11 +4180,11 @@ $("libRun").addEventListener("click", async () => {
 let CZ = { suite: null, ids: [], job: null, brief: "", stop: false };
 
 function czShow(stage) {
-  for (const id of ["czAsk", "czWait", "czPaste", "czDone"]) {
+  for (const id of ["czAsk", "czWait", "czPaste", "czDone", "czMcp"]) {
     $(id).hidden = id !== ({ ask: "czAsk", wait: "czWait", paste: "czPaste",
-                             done: "czDone" })[stage];
+                             done: "czDone", mcp: "czMcp" })[stage];
   }
-  const step = { ask: "ask", wait: "write", paste: "write", done: "done" }[stage];
+  const step = { ask: "ask", wait: "write", paste: "write", done: "done", mcp: "ask" }[stage];
   $("czSteps").querySelectorAll("span").forEach((el) =>
     el.classList.toggle("on", el.dataset.s === step));
 }
@@ -4298,6 +4298,33 @@ function czRender(d) {
   }).join("");
   czShow("done");
 }
+
+/* Connecting an AI tool directly is set up once, outside this page; all this
+   screen can usefully do is hand over exactly what to paste, and say what the
+   tool will and will not be given. */
+$("czMcpOpen").addEventListener("click", async () => {
+  const { data } = await api("/api/mcp/setup");
+  $("czMcpWays").innerHTML = (data.ways || []).map((w, i) => `
+    <div class="mcpway" data-mcp="${esc(w.tool)}">
+      <div class="hd"><b>${esc(w.tool)}</b><span class="hint">${esc(w.how)}</span>
+        <span class="grow"></span><button class="sm" data-mcpcopy="${i}">Copy</button></div>
+      <pre>${esc(w.shown)}</pre>
+    </div>`).join("");
+  $("czMcpWays").querySelectorAll("[data-mcpcopy]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const way = data.ways[Number(b.dataset.mcpcopy)];
+      try {
+        await navigator.clipboard.writeText(way.copy);
+        b.textContent = "Copied";
+        banner("ok", `Copied, with the full path for this computer. ${way.how}`);
+      } catch {
+        banner("err", "Could not copy — select the text and copy it yourself.");
+      }
+      setTimeout(() => { b.textContent = "Copy"; }, 2500);
+    }));
+  czShow("mcp");
+});
+$("czMcpBack").addEventListener("click", () => czShow("ask"));
 
 async function czTry(env, button) {
   if (button) { button.disabled = true; button.textContent = "Trying…"; }

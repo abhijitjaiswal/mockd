@@ -718,6 +718,39 @@ Or press **Run tests** in the console, pick the environment from the dropdown,
 and anyone gets the same assertions with the same test data against whichever
 server they chose. Exit code is non-zero on failure, blocked or error.
 
+## Letting an AI tool write the tests (MCP)
+
+`mcp_server.py` exposes mockd to an AI assistant as a set of tools, over the
+Model Context Protocol. There is no AI in it and it needs no key: it answers
+function calls with the same code the console uses. The assistant is whatever
+tool the tester already has — Claude Code, Claude Desktop, Cursor.
+
+Connect it once. The console's **Create tests** screen has the exact text to
+paste for each tool ("Show me how"); for Claude Code it is one command:
+
+    claude mcp add mockd -- /path/to/.venv/bin/python /path/to/mcp_server.py
+
+Then ask the assistant in its own window — "write tests for cancelling an
+order" — and it works through these itself:
+
+| Tool | What the assistant gets |
+|---|---|
+| `get_test_format` | the JSON a test is written in, and the rules |
+| `find_operations` | which endpoints a request is about |
+| `get_operation` | one endpoint's fields, limits and documented answers, with a real response from the mock |
+| `where_does_this_id_come_from` | which call supplies an id, and the path to capture it from |
+| `list_tests` | what already exists |
+| `list_servers` | where tests can run — names and addresses only |
+| `validate_tests` | every problem with its tests, without saving |
+| `save_tests` | validates, then adds them to the draft workspace |
+| `run_tests` | each result on the mock or a named server, with the failing step and response |
+
+What it cannot do, by construction: see a token, password or cookie (a server
+is named, and signed in to here); write to a server marked read only; change
+or remove an existing test; or write tests for an endpoint that is not in the
+project's API document. What does leave the machine is what the tools return —
+endpoint and field names, sample responses, and the response of a failing test.
+
 ## Wiring it into CI
 
 `.github/workflows/api-contract.yml` and `ci/gitlab-ci.yml` are ready to copy —
@@ -964,6 +997,7 @@ their generated assertions.
 apis.json            the swagger document (untouched by any of this)
 mockd.py             the server
 console.py           local control panel (serves console.html + console.js)
+mcp_server.py        mockd as tools an AI assistant can call (MCP, over stdio)
 console.html         the panel's markup
 console.js           the panel's logic
 generator.py         JSON Schema -> example value

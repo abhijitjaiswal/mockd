@@ -25,7 +25,7 @@ if ! NODE_PATH="$NODE_PATH" node -e "require('playwright')" 2>/dev/null; then
 fi
 
 SANITY="e2e toast home"
-TESTS="workbench wbasserts oppicker selectors pipeline library openload scoped envalign visible report assert runnow chain lifecycle record baseline create list bug"
+TESTS="workbench wbasserts oppicker selectors pipeline library openload scoped envalign visible report assert runnow chain lifecycle record baseline create list bug mcp"
 SPEC="specpick projectspec compare discover params newenv envlogin servers document"
 MISC="picker progress splice envvars reveal"
 

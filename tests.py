@@ -2277,7 +2277,11 @@ def story_is_about_this_api(spec, story, share=0.25):
     routes = list(spec.routes) if spec is not None else []
     if not routes:
         return False
-    ceiling = max(1, int(len(routes) * share))
+    # ...but never fewer than one resource's worth. List, create, read, change
+    # and delete make five operations that all name the same thing; in a small
+    # document that is most of it, and a quarter of four operations is one — so
+    # "create an order" was judged not to be about an API made only of orders.
+    ceiling = max(5, int(len(routes) * share))
     for _, _, hits in relevant_routes(spec, story, limit=8, details=True):
         # in a PATH or a TAG, not merely somewhere in the prose: naming the
         # thing is what distinguishes a story about this API from one that
