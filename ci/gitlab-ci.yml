@@ -24,6 +24,15 @@ contract:
         echo "Commit it, or choose one with: python project.py use <file>"
         exit 1
       fi
+    # What does this merge request change in the contract? Fails on a breaking
+    # change, so it is agreed before it merges. Set ALLOW_BREAKING=1 on the
+    # pipeline to let an agreed one through.
+    - |
+      if [ -n "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" ]; then
+        git fetch --quiet --depth=1 origin "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+        GATE="--fail-on-breaking"; [ -n "$ALLOW_BREAKING" ] && GATE=""
+        python impact.py --against "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" --format markdown $GATE
+      fi
     - |
       if [ -f spec.lock.json ]; then python speclock.py check --spec "$SPEC";
       else echo "Nothing pinned yet — skipping the provenance check."; fi

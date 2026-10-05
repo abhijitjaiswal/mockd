@@ -45,8 +45,8 @@ process.on("exit", () => { try { fs.rmSync(FILE, { force: true }); } catch { /* 
   const row = p.locator("#libList .librow").first();
   check("the test is in the list", /a probe that waits for a value/.test(await row.textContent()));
   check("and is marked as needing a value, not as failing or never run",
-        /needs a value/.test(await row.locator(".libres").textContent()),
-        await row.locator(".libres").textContent());
+        /needs a value/.test(await row.locator(".top .libres").textContent()),
+        await row.locator(".top .libres").textContent());
 
   await row.locator(".top .nm").click();
   await p.waitForTimeout(400);
@@ -73,15 +73,15 @@ process.on("exit", () => { try { fs.rmSync(FILE, { force: true }); } catch { /* 
         JSON.parse(fs.readFileSync(FILE, "utf8")).scenarios[0].data.probeKey === "K-2291");
   await p.waitForTimeout(800);
   const after = p.locator("#libList .librow").first();
-  check("the flag is gone", !/needs a value/.test(await after.locator(".libres").textContent()),
-        await after.locator(".libres").textContent());
+  check("the flag is gone", !/needs a value/.test(await after.locator(".top .libres").textContent()),
+        await after.locator(".top .libres").textContent());
   check("and so is the box asking for it", await after.locator("[data-libneed]").count() === 0);
 
   await after.locator("[data-librun]").click();
   await p.waitForFunction(() => /passes|does not pass/.test(
-    (document.querySelector("#libList .librow .libres") || {}).textContent || ""), null, { timeout: 60000 }).catch(() => {});
+    (document.querySelector("#libList .librow .top .libres") || {}).textContent || ""), null, { timeout: 60000 }).catch(() => {});
   check("with the value in place the test runs and passes",
-        /passes/.test(await p.locator("#libList .librow .libres").first().textContent()),
+        /passes/.test(await p.locator("#libList .librow .top .libres").first().textContent()),
         await p.locator("#libList .librow").first().textContent());
 
   console.log(`\n${pass} passed, ${fail} failed`);

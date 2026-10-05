@@ -1448,7 +1448,69 @@ def group_needs():
     check("needs: and the module holds it", suite["data"]["region"], "north")
 
 
+def group_impact():
+    """A changed document, and which tests it reaches."""
+    import copy
+    import json as _json
+    import impact
+
+    uid = {"type": "string", "format": "uuid"}
+    widget = {"type": "object", "required": ["id", "name"],
+              "properties": {"id": uid, "name": {"type": "string"}, "size": {"type": "integer"}}}
+    ok = lambda sch: {"description": "ok", "content": {"application/json": {"schema": sch}}}
+    v1 = {"openapi": "3.1.0", "info": {"title": "W", "version": "1"}, "paths": {
+        "/health": {"get": {"responses": {"200": ok({"type": "object"})}}},
+        "/widgets": {"post": {"requestBody": {"content": {"application/json": {"schema": {
+            "type": "object", "required": ["name"],
+            "properties": {"name": {"type": "string"}}}}}},
+            "responses": {"201": ok(widget)}}},
+        "/widgets/{widget_id}": {"get": {
+            "parameters": [{"name": "widget_id", "in": "path", "required": True, "schema": uid}],
+            "responses": {"200": ok(widget)}}}}}
+    v2 = copy.deepcopy(v1)
+    reply = v2["paths"]["/widgets/{widget_id}"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+    del reply["properties"]["size"]                              # a caller may read this
+    body = v2["paths"]["/widgets"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+    body["required"].append("colour"); body["properties"]["colour"] = {"type": "string"}
+    v2["paths"]["/gadgets"] = {"get": {"responses": {"200": ok({"type": "object"})}}}
+
+    suites = [{"name": "mine", "_stage": "draft", "cases": [
+        {"id": "reads-one", "name": "reads a widget",
+         "request": {"method": "GET", "path": "/widgets/{{widgetId}}"}, "assertions": []},
+        {"id": "is-up", "request": {"method": "GET", "path": "/health"}, "assertions": []}],
+        "scenarios": [{"id": "makes-one", "steps": [
+            {"request": {"method": "POST", "path": "/widgets", "body": {"name": "n"}}},
+            {"request": {"method": "GET", "path": "/health"}}]}]}]
+
+    found = impact.assess(_json.dumps(v1), _json.dumps(v2), suites, "v1", "v2")
+    check_true("impact: a response field removed and a request field demanded are breaking",
+               found["counts"]["breaking"] >= 2, str(found["counts"]))
+    check_true("impact: a new operation is an addition", found["counts"]["additive"] >= 1)
+    hit = {t["id"]: t for t in found["tests"]["affected"]}
+    check("impact: the tests that call what changed are found", sorted(hit), ["makes-one", "reads-one"])
+    check("impact: one that calls only unchanged operations is not", "is-up" in hit, False)
+    check("impact: a test written with {{a variable}} is matched to its operation",
+          hit["reads-one"]["operations"], ["GET /widgets/{widget_id}"])
+    check("impact: each says how badly", hit["makes-one"]["severity"], "breaking")
+    check_true("impact: and why", "colour" in " ".join(hit["makes-one"]["because"]),
+               str(hit["makes-one"]["because"]))
+    check_true("impact: the summary counts both the changes and the tests",
+               "would break" in found["sentence"] and "2 of your 3 tests" in found["sentence"],
+               found["sentence"])
+    same = impact.assess(_json.dumps(v1), _json.dumps(v1), suites)
+    check("impact: an identical document reaches nothing", same["tests"]["affected"], [])
+    check_true("impact: and says so plainly", "Nothing in it changes" in same["sentence"])
+    check_true("impact: it can be pasted into a pull request",
+               "Tests that use what changed" in impact.as_markdown(found))
+
+    gone = copy.deepcopy(v1); del gone["paths"]["/widgets/{widget_id}"]
+    removed = impact.assess(_json.dumps(v1), _json.dumps(gone), suites)
+    check_true("impact: a test of an operation the new document removes is still found",
+               any(t["id"] == "reads-one" for t in removed["tests"]["affected"]))
+
+
 GROUPS = {
+    "impact": group_impact,
     "needs": group_needs,
     "mcp": group_mcp,
     "plain_rest": group_plain_rest,

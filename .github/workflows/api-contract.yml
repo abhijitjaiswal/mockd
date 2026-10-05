@@ -2,7 +2,8 @@
 # `python project.py show` decides that, not a filename written in here — so a
 # fork that points mockd at its own API needs no edits to this file.
 #
-# Four checks, cheapest first, each answering a different question:
+# Checks, cheapest first, each answering a different question:
+#   0. does this pull request change the contract?     (impact — PRs only)
 #   1. is the document the one that was pinned?        (provenance)
 #   2. does the overlay still match it?                (drift)
 #   3. does the mock still satisfy it?                 (self-check)
@@ -48,6 +49,22 @@ jobs:
             echo "::warning::The project spec ($SPEC) is not in this repository."
             echo "Commit it, or set one with: python project.py use <file>"
           fi
+
+      # 0. Does this pull request change the contract? The document here is
+      #    compared with the one on the base branch, field by field, and the
+      #    result — what would break, and which saved tests use it — is written
+      #    to the run's summary. A breaking change fails the check, so it is
+      #    agreed before it merges rather than discovered after. To let an
+      #    agreed one through, label the pull request `breaking-change-agreed`.
+      - name: What this pull request changes in the contract
+        if: github.event_name == 'pull_request' && steps.spec.outputs.present == 'yes'
+        run: |
+          git fetch --quiet --depth=1 origin "${{ github.base_ref }}"
+          GATE="--fail-on-breaking"
+          if [ "${{ contains(github.event.pull_request.labels.*.name, 'breaking-change-agreed') }}" = "true" ]; then GATE=""; fi
+          python impact.py --against "origin/${{ github.base_ref }}" --format markdown --out impact.md $GATE || FAILED=1
+          cat impact.md >> "$GITHUB_STEP_SUMMARY"
+          exit ${FAILED:-0}
 
       # 1. The spec is an INPUT that decides whether tests pass, so pin it.
       #    Fails if the document is not the one recorded in spec.lock.json —

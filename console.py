@@ -407,7 +407,10 @@ def project_set():
     known = spec.lower().startswith(("http://", "https://")) or (HERE / spec).exists()
     if not known:
         return jsonify({"ok": False, "error": f"{spec} does not exist"}), 400
+    was = project.active_spec() if not module else None
     project.set_active(spec=spec, overlay=payload.get("overlay"), module=module)
+    if was and was != project.active_spec():
+        remember_document_change(was, project.active_spec())
 
     # A setting the running mock ignores is not a project-wide setting. If the
     # mock is up on a different document, move it — otherwise coverage, the
@@ -435,6 +438,170 @@ def project_set():
                     "mock_spec": mock.options.get("spec") if mock.running else None,
                     "message": f"{where} now uses {spec} — commit mockd.json "
                                f"so the team shares it.{moved}"})
+
+
+CHANGE_FILE = LOG_DIR / "document-change.json"
+
+
+def document_impact(before, after):
+    """What moving from one document to another does to the tests we have."""
+    import impact
+    import specdiff
+    import tests as t
+    return impact.assess(specdiff._read(before), specdiff._read(after),
+                         t.load_suites(include_drafts=True), before, after)
+
+
+def remember_document_change(before, after):
+    """Keep what the last switch of document changed, so it can be pointed out
+    until the tests it reaches have been run. Never gets in the way of the
+    switch itself: a comparison that cannot be made is simply not remembered."""
+    try:
+        found = document_impact(before, after)
+        if found["identical"]:
+            CHANGE_FILE.unlink(missing_ok=True)
+            return
+        LOG_DIR.mkdir(exist_ok=True)
+        CHANGE_FILE.write_text(json.dumps({
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "from": before, "to": after, "sentence": found["sentence"],
+            "counts": found["counts"], "changes": found["changes"][:40],
+            "tests": found["tests"]["affected"]}, indent=1))
+    except Exception:
+        pass
+
+
+@app.post("/api/spec/impact")
+def spec_impact():
+    """A document that has been loaded but not yet put to use: what would it
+    change, and which of our tests would it reach?"""
+    payload = request.get_json(silent=True) or {}
+    proposed = (payload.get("to") or "").strip()
+    current = (payload.get("from") or "").strip() or project.active_spec()
+    if not proposed:
+        return jsonify({"ok": False, "error": "which document?"}), 400
+    if proposed == current:
+        return jsonify({"ok": True, "same_file": True, "identical": True,
+                        "sentence": "That is the document already in use.",
+                        "counts": {}, "changes": [], "tests": {"total": 0, "affected": []}})
+    try:
+        return jsonify({"ok": True, **document_impact(current, proposed)})
+    except SystemExit as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 200
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 200
+
+
+@app.get("/api/noticed")
+def noticed():
+    """Everything mockd has noticed by itself that somebody should know about.
+
+    Nobody asked for any of this to be checked. That is the point: a contract
+    that moved, a test that cannot pass, a mock that no longer matches — each
+    was already knowable from what is on disk, and was waiting to be looked
+    for. One list, worst first, each with the one thing to do about it."""
+    import tests as t
+    out = []
+    suites = t.load_suites(include_drafts=True)
+    history = t.load_history()
+
+    # 1. the document moved, and tests that use what moved have not run since
+    try:
+        change = json.loads(CHANGE_FILE.read_text())
+    except (OSError, ValueError):
+        change = None
+    if change and not change.get("dismissed"):
+        waiting = []
+        for test in change.get("tests") or []:
+            runs = (history.get(f"{test['suite']}/{test['id']}") or {}).get("by_env") or {}
+            if not any((r.get("last_run") or "") > change["at"] for r in runs.values()):
+                waiting.append(f"{test['suite']}|{test['stage']}|{test['id']}")
+        counts = change.get("counts") or {}
+        # Dealt with once every test it reaches has been run again — what those
+        # runs found then shows up as failures, below. A breaking change that
+        # reaches no test at all is still said once, until put away.
+        if waiting or (counts.get("breaking") and not change.get("tests")):
+            out.append({
+                "key": "document-changed", "level": "act" if counts.get("breaking") else "look",
+                "title": "The API document changed",
+                "detail": change.get("sentence") or "",
+                "more": [f"{c['operation']}: {c['what']}" + (f" ({c['detail']})" if c.get("detail") else "")
+                         for c in (change.get("changes") or []) if c.get("severity") == "breaking"][:6],
+                "tests": waiting,
+                "action": ({"label": f"Run the {len(waiting)} affected test{'s' if len(waiting) != 1 else ''}",
+                            "go": "tests", "only": waiting,
+                            "label_for_filter": "affected by the document change"}
+                           if waiting else None),
+                "dismiss": True})
+
+    # 2. tests that cannot pass until somebody gives them a value
+    needing = [f"{s.get('name')}|{s.get('_stage', 'shared')}|{x.get('id')}"
+               for s in suites for x in (s.get("scenarios") or []) + (s.get("cases") or [])
+               if t.waiting_for(x, s.get("data"))]
+    if needing:
+        n = len(needing)
+        out.append({"key": "needs-values", "level": "act",
+                    "title": f"{n} test{'s are' if n != 1 else ' is'} waiting for a value only you know",
+                    "detail": "Something nothing in the API can supply. Until it is filled in, "
+                              "the test cannot pass on a real server.",
+                    "action": {"label": "Show them", "go": "tests", "only": needing,
+                               "label_for_filter": "waiting for a value"}})
+
+    # 3. the mock no longer answers the way the document says
+    try:
+        check = json.loads((LOG_DIR / "mock-selfcheck.json").read_text())
+        broken = [r for r in check.get("results") or [] if r.get("level") == "error"]
+    except Exception:
+        broken = []
+    if broken and mock.running:
+        n = len(broken)
+        out.append({"key": "mock-unfaithful", "level": "act",
+                    "title": f"The mock does not match the document on {n} endpoint{'s' if n != 1 else ''}",
+                    "detail": "Tests that pass there may be passing on the mock's own behaviour "
+                              "rather than on what was agreed.",
+                    "more": [str(r.get("operation") or r.get("key") or "") for r in broken][:6],
+                    "action": {"label": "See which", "go": "overview"}})
+
+    # 4. tests whose last run on a server did not pass
+    failing = {}
+    for s in suites:
+        for x in (s.get("scenarios") or []) + (s.get("cases") or []):
+            if t.status_of(x) == "retired":
+                continue
+            runs = (history.get(f"{s.get('name')}/{x.get('id')}") or {}).get("by_env") or {}
+            for env, seen in runs.items():
+                if re.match(r"https?:", env) or seen.get("last_outcome") in (None, "pass"):
+                    continue
+                failing.setdefault(env, []).append(
+                    f"{s.get('name')}|{s.get('_stage', 'shared')}|{x.get('id')}")
+    for env, keys in sorted(failing.items(), key=lambda kv: (kv[0] == "mock", kv[0])):
+        n = len(keys)
+        out.append({"key": f"failing-{env}", "level": "look",
+                    "title": f"{n} test{'s' if n != 1 else ''} did not pass on {env} last time",
+                    "detail": "A failure on a real server is usually the API; on the mock it is "
+                              "usually the test." if env != "mock" else
+                              "On the mock a failure is usually the test, or a rule the mock "
+                              "cannot know.",
+                    "action": {"label": "Show them", "go": "tests", "only": keys, "server": env,
+                               "label_for_filter": f"not passing on {env}"}})
+
+    order = {"act": 0, "look": 1}
+    out.sort(key=lambda f: order.get(f["level"], 9))
+    return jsonify({"noticed": out})
+
+
+@app.post("/api/noticed/dismiss")
+def noticed_dismiss():
+    key = (request.get_json(silent=True) or {}).get("key")
+    if key == "document-changed":
+        try:
+            change = json.loads(CHANGE_FILE.read_text())
+            change["dismissed"] = True
+            CHANGE_FILE.write_text(json.dumps(change, indent=1))
+        except (OSError, ValueError):
+            pass
+        return jsonify({"ok": True})
+    return jsonify({"ok": False, "error": "that cannot be put away"}), 200
 
 
 @app.get("/api/defaults")

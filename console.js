@@ -3584,7 +3584,9 @@ $("docLoad").addEventListener("click", async () => {
         <button class="sm" id="docCancel">Cancel</button>
         <span class="hint">The mock restarts on it and the baseline tests are remade.
           Tests you wrote are kept.</span>
-      </div>`;
+      </div>
+      <div class="docimpact" id="docImpact"><span class="hint">Working out what it would change…</span></div>`;
+    docImpact(data.file);
     $("docCancel").onclick = () => {
       DOC.found = null; $("docFound").hidden = true; $("docFile").value = "";
       $("docChosen").textContent = "Nothing changes until you have seen what was found.";
@@ -3596,6 +3598,31 @@ $("docLoad").addEventListener("click", async () => {
     $("docLoad").disabled = false; $("docLoad").textContent = "Load";
   }
 });
+
+/* What using this document would change — worked out without being asked,
+   because the moment before a contract is swapped is the one moment it is
+   cheap to find out. One sentence; the detail is there for whoever wants it. */
+async function docImpact(file) {
+  const host = $("docImpact");
+  let d;
+  try { ({ data: d } = await api("/api/spec/impact", { method: "POST", body: JSON.stringify({ to: file }) })); }
+  catch { if (host) host.textContent = ""; return; }
+  if (!$("docImpact") || !DOC.found || DOC.found.file !== file) return;
+  if (!d.ok) { host.textContent = ""; return; }
+  const WORD = { breaking: "breaks", note: "look", additive: "adds" };
+  const changes = d.changes || [], tests = (d.tests || {}).affected || [];
+  host.innerHTML = `<div><b>Compared with the one in use:</b> ${esc(d.sentence)}</div>`
+    + (changes.length ? `<details style="margin-top:5px"><summary style="cursor:pointer">See what changes</summary>
+        ${changes.slice(0, 12).map((c) => `<div class="line"><span class="sev ${esc(c.severity)}">${
+          esc(WORD[c.severity] || c.severity)}</span><code>${esc(c.operation)}</code> — ${esc(c.what)}${
+          c.detail ? ` <span class="hint">(${esc(c.detail)})</span>` : ""}</div>`).join("")}
+        ${changes.length > 12 ? `<div class="hint">…and ${changes.length - 12} more, under Advanced → Compare two documents.</div>` : ""}
+        ${tests.length ? `<div style="margin-top:6px"><b>Tests that use what changed</b></div>`
+          + tests.slice(0, 8).map((t) => `<div class="line"><span class="sev ${esc(t.severity)}">${
+              esc(WORD[t.severity] || t.severity)}</span>${esc(t.name)} <span class="hint">· ${esc(t.suite)}</span></div>`).join("")
+          + (tests.length > 8 ? `<div class="hint">…and ${tests.length - 8} more.</div>` : "") : ""}
+      </details>` : "");
+}
 
 async function docUse() {
   if (!DOC.found) return;
@@ -3804,6 +3831,43 @@ $("srvAdd").addEventListener("click", () => {
   };
 });
 
+/* ------------------------------------------------------------- noticed
+   Things mockd found without being asked: a contract that moved under the
+   tests, a test that cannot pass, a mock that no longer matches. Shown only
+   when there is something to say, each with the one thing to do about it. */
+async function homeNoticed() {
+  let d;
+  try { ({ data: d } = await api("/api/noticed")); } catch { return; }
+  const list = (d && d.noticed) || [];
+  $("homeNoticedCard").hidden = !list.length;
+  $("homeNoticed").innerHTML = list.map((f, i) => `
+    <div class="noticed ${esc(f.level)}" data-noticed="${esc(f.key)}">
+      <span class="mark"></span>
+      <span class="what"><b>${esc(f.title)}</b><div>${esc(f.detail)}</div>
+        ${(f.more || []).length ? `<ul>${f.more.map((m) => `<li>${esc(m)}</li>`).join("")}</ul>` : ""}</span>
+      <span class="btns">
+        ${f.action ? `<button class="sm" data-noticedgo="${i}">${esc(f.action.label)}</button>` : ""}
+        ${f.dismiss ? `<button class="sm" data-noticedoff="${esc(f.key)}" title="stop showing this">Dismiss</button>` : ""}
+      </span>
+    </div>`).join("");
+  $("homeNoticed").querySelectorAll("[data-noticedgo]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const action = list[Number(b.dataset.noticedgo)].action;
+      if (action.go === "tests") {
+        LIB.only = { keys: new Set(action.only || []), label: action.label_for_filter || "picked out for you" };
+        LIB.q = ""; LIB.module = ""; LIB.type = ""; LIB.priority = ""; LIB.result = ""; LIB.page = 0;
+        $("libSearch").value = "";
+        LIB.wantServer = action.server || "";
+        showView("tests");
+      } else showView(action.go);
+    }));
+  $("homeNoticed").querySelectorAll("[data-noticedoff]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      await api("/api/noticed/dismiss", { method: "POST", body: JSON.stringify({ key: b.dataset.noticedoff }) });
+      homeNoticed();
+    }));
+}
+
 /* ----------------------------------------------------------------- home
    The first screen answers two questions and nothing else: is everything in
    place, and what should I do now. Each line is a fact with one action beside
@@ -3904,6 +3968,8 @@ async function homeLoad() {
        <button class="primary" data-homego="create">Create tests</button>
        <button data-homego="tests">Open Tests</button>`;
 
+  homeNoticed();
+
   $("homeList").innerHTML = rows.map((r) => `
     <div class="homerow" data-home="${r.key}">
       <span class="dot ${r.ok ? "ok" : r.idle ? "idle" : "todo"}">${r.ok ? "✓" : r.idle ? "·" : "!"}</span>
@@ -3985,7 +4051,8 @@ function libFiltered() {
   const env = $("libEnv").value || "mock";
   const q = LIB.q.toLowerCase();
   return libAll().filter((t) =>
-    (!q || `${t.name || ""} ${t.id} ${t.description || ""}`.toLowerCase().includes(q))
+    (!LIB.only || LIB.only.keys.has(`${t.suite}|${t.stage}|${t.id}`))
+    && (!q || `${t.name || ""} ${t.id} ${t.description || ""}`.toLowerCase().includes(q))
     && (!LIB.module || t.suite === LIB.module)
     && (!LIB.type || (t.levels || []).includes(LIB.type))
     && (!LIB.priority || t.priority === LIB.priority)
@@ -4025,8 +4092,18 @@ function libFillPickers() {
 function libRender() {
   if (!$("libList")) return;
   libFillPickers();
+  if (LIB.wantServer && [...$("libEnv").options].some((o) => o.value === LIB.wantServer && !o.disabled)) {
+    $("libEnv").value = LIB.wantServer; $("testEnv").value = LIB.wantServer;
+  }
+  LIB.wantServer = "";
   const env = $("libEnv").value || "mock";
   const all = libAll(), shown = libFiltered();
+  $("libOnly").hidden = !LIB.only;
+  if (LIB.only) {
+    $("libOnly").innerHTML = `<span>Showing only the <b>${shown.length}</b> test${shown.length === 1 ? "" : "s"} ${
+      esc(LIB.only.label)}.</span><span class="grow"></span><button class="sm" id="libOnlyOff">Show all tests</button>`;
+    $("libOnlyOff").onclick = () => { LIB.only = null; libRender(); };
+  }
   const pages = Math.max(1, Math.ceil(shown.length / LIB_PAGE));
   LIB.page = Math.min(LIB.page, pages - 1);
   const slice = shown.slice(LIB.page * LIB_PAGE, (LIB.page + 1) * LIB_PAGE);
@@ -4058,8 +4135,8 @@ function libRender() {
             ${t.status && t.status !== "ready" ? ` · <b>${esc(t.status)}</b>` : ""}
             ${t.owner ? ` · ${esc(t.owner)}` : ""}</div>
         </span>
-        ${(t.needs || []).length && out !== "pass"
-          ? '<span class="libres wait" title="it cannot pass until somebody gives it a real value">needs a value</span>'
+        ${(t.needs || []).length
+          ? '<span class="libres wait" title="it holds a placeholder — a pass with one in place proves nothing">needs a value</span>'
           : `<span class="libres ${out}">${WORD[out]}</span>`}
         <button class="sm" data-librun="${esc(key)}">Run</button>
       </div>

@@ -367,6 +367,23 @@
             margin-bottom:11px;background:var(--bg)}
   .stepedit h5{margin:0 0 7px;font-size:12px;font-weight:650;display:flex;gap:8px;
                align-items:center}
+  .noticed{display:flex;gap:12px;align-items:flex-start;padding:11px 2px;
+           border-bottom:1px solid var(--line)}
+  .noticed:last-child{border-bottom:0}
+  .noticed .mark{flex:none;width:9px;height:9px;border-radius:50%;margin-top:6px;background:#b25e00}
+  .noticed.act .mark{background:var(--err)}
+  .noticed .what{flex:1;min-width:0}
+  .noticed .what b{font-size:13.5px}
+  .noticed .what div{font-size:12.5px;color:var(--muted);margin-top:2px}
+  .noticed .what ul{margin:5px 0 0 16px;padding:0;font-size:12px;color:var(--muted)}
+  .noticed .btns{display:flex;gap:6px;flex:none;align-items:center}
+  .libonly{display:flex;gap:10px;align-items:center;margin:2px 0 8px;padding:7px 11px;
+           border:1px solid #b2ccff;background:#f5f8ff;border-radius:8px;font-size:12.5px}
+  .docimpact{margin-top:9px;font-size:12.5px}
+  .docimpact .line{padding:2px 0}
+  .docimpact .sev{font-weight:700;font-size:11px;margin-right:6px}
+  .docimpact .sev.breaking{color:var(--err)} .docimpact .sev.note{color:#b25e00}
+  .docimpact .sev.additive{color:var(--ok,#136c34)}
   .mcpway{border:1px solid var(--line);border-radius:8px;padding:11px 14px;margin:10px 0}
   .mcpway .hd{display:flex;gap:10px;align-items:center}
   .mcpway .hd b{font-size:13.5px}
@@ -506,6 +523,12 @@
     </header>
     <div class="card" id="homeNextCard">
       <div class="body homenext" id="homeNext">Checking…</div>
+    </div>
+    <div class="card" id="homeNoticedCard" hidden>
+      <h3>mockd noticed <span class="grow"></span>
+        <span class="hint" style="text-transform:none;letter-spacing:0;font-weight:400">found
+          by itself — nobody had to ask</span></h3>
+      <div class="body" id="homeNoticed"></div>
     </div>
     <div class="card">
       <h3>Where things stand</h3>
@@ -974,6 +997,7 @@
             <button class="primary" id="libRun">Run these</button>
           </span>
         </div>
+        <div id="libOnly" class="libonly" hidden></div>
         <div id="libList"></div>
         <div class="btnrow" id="libPager" style="margin-top:10px"></div>
       </div>
