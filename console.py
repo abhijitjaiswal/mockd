@@ -585,6 +585,19 @@ def noticed():
                     "action": {"label": "Show them", "go": "tests", "only": keys, "server": env,
                                "label_for_filter": f"not passing on {env}"}})
 
+    # 5. real traffic that does not match the document
+    try:
+        seen = _recorded_findings()
+    except Exception:
+        seen = None
+    if seen and seen.get("disagreements"):
+        n = seen["disagreements"]
+        where = (seen.get("meta") or {}).get("server") or "the real API"
+        out.append({"key": "real-api-differs", "level": "act",
+                    "title": f"{where} and the document disagree in {n} place{'s' if n != 1 else ''}",
+                    "detail": seen["sentence"],
+                    "action": {"label": "See them", "go": "environments"}})
+
     order = {"act": 0, "look": 1}
     out.sort(key=lambda f: order.get(f["level"], 9))
     return jsonify({"noticed": out})
@@ -2526,6 +2539,181 @@ def t_coerce(value):
     return _coerce(value)
 
 
+# ---------------------------------------------------------------------------
+# Learning from real traffic
+# ---------------------------------------------------------------------------
+RECORDED = LOG_DIR / "recorded.jsonl"
+RECORDED_META = LOG_DIR / "recorded.meta.json"
+
+
+class RecorderProcess:
+    """recorder.py as a child process: passes an app's traffic through to a
+    real server and writes down what happened."""
+
+    def __init__(self):
+        self.proc, self.server, self.port = None, None, None
+
+    @property
+    def running(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def start(self, server, port):
+        if self.running:
+            return False, "already watching"
+        cmd = [sys.executable, str(HERE / "recorder.py"), "--env", server,
+               "--port", str(port), "--out", str(RECORDED)]
+        self.proc = subprocess.Popen(cmd, cwd=str(HERE), stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.PIPE, text=True)
+        for _ in range(40):
+            if self.proc.poll() is not None:
+                return False, (self.proc.stderr.read() or "it stopped at once").strip()[-300:]
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/_recorder/state", timeout=1):
+                    self.server, self.port = server, port
+                    return True, "watching"
+            except Exception:
+                time.sleep(0.25)
+        self.stop()
+        return False, "it did not come up"
+
+    def stop(self):
+        if self.proc is not None:
+            try:
+                self.proc.terminate()
+                self.proc.wait(timeout=5)
+            except Exception:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+        self.proc = None
+
+
+recorder = RecorderProcess()
+
+
+def _recording():
+    import observe
+    return observe.load(RECORDED)
+
+
+def _recorded_findings():
+    """The recording set against the project's document, or None if there is none."""
+    import observe
+    exchanges = _recording()
+    if not exchanges:
+        return None
+    spec = load_project_spec()
+    if spec is None:
+        return None
+    found = observe.analyse(exchanges, spec)
+    try:
+        found["meta"] = json.loads(RECORDED_META.read_text())
+    except (OSError, ValueError):
+        found["meta"] = {}
+    return found
+
+
+@app.get("/api/record")
+def record_state():
+    """Is traffic being watched, and what has it shown so far?"""
+    import environments as envmod
+    servers = []
+    for name, env in sorted(envmod.load().items()):
+        if name == "mock" or name.startswith("mock-"):
+            continue
+        missing = []
+        envmod.resolve({"base_url": env.get("base_url"), "auth": env.get("auth"),
+                        "headers": env.get("headers")}, missing)
+        if not missing:
+            servers.append({"name": name, "read_only": bool(env.get("readonly"))})
+    found = _recorded_findings()
+    return jsonify({"watching": recorder.running, "server": recorder.server if recorder.running else None,
+                    "address": f"http://localhost:{recorder.port}" if recorder.running else None,
+                    "servers": servers, "found": found,
+                    "calls": (found or {}).get("calls", 0)})
+
+
+@app.post("/api/record/start")
+def record_start():
+    import environments as envmod
+    server = ((request.get_json(silent=True) or {}).get("server") or "").strip()
+    if server not in envmod.load() or server == "mock" or server.startswith("mock-"):
+        return jsonify({"ok": False, "error": "choose one of your servers"}), 200
+    port = mock.port + 1
+    ok, message = recorder.start(server, port)
+    if not ok:
+        return jsonify({"ok": False, "error": f"Could not start watching: {message}"}), 200
+    LOG_DIR.mkdir(exist_ok=True)
+    RECORDED_META.write_text(json.dumps({
+        "server": server, "source": "watched",
+        "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}))
+    return jsonify({"ok": True, "address": f"http://localhost:{port}", "server": server})
+
+
+@app.post("/api/record/stop")
+def record_stop():
+    recorder.stop()
+    return jsonify({"ok": True})
+
+
+@app.post("/api/record/clear")
+def record_clear():
+    for path in (RECORDED, RECORDED_META):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    return jsonify({"ok": True})
+
+
+@app.post("/api/record/har")
+def record_har():
+    """A recording exported from a browser, in place of watching live."""
+    import observe
+    payload = request.get_json(silent=True) or {}
+    spec = load_project_spec()
+    try:
+        exchanges, host = observe.from_har(payload.get("content") or "", spec)
+    except ValueError:
+        return jsonify({"ok": False, "error": "That is not a browser recording. In the browser's "
+                        "developer tools, Network tab, choose “Save all as HAR”."}), 200
+    if not exchanges:
+        return jsonify({"ok": False, "error": "Nothing in that recording is a call to this API. "
+                        "Record while using the app that talks to it."}), 200
+    LOG_DIR.mkdir(exist_ok=True)
+    RECORDED.write_text("".join(json.dumps(e, ensure_ascii=False) + "\n" for e in exchanges))
+    RECORDED_META.write_text(json.dumps({
+        "server": host, "source": "browser recording",
+        "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}))
+    return jsonify({"ok": True, "calls": len(exchanges), "host": host})
+
+
+@app.post("/api/record/test")
+def record_test():
+    """What was recorded, saved as a test that can be run again."""
+    import observe
+    import tests as t
+    spec = load_project_spec()
+    try:
+        meta = json.loads(RECORDED_META.read_text())
+    except (OSError, ValueError):
+        meta = {}
+    module = _unique_suite("recorded")
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    test, notes = observe.test_from(_recording(), spec, name=f"recorded-{stamp}",
+                                    server=meta.get("server"))
+    if test is None:
+        return jsonify({"ok": False, "error": "There is nothing to make a test from: "
+                                              + notes[0] + "."}), 200
+    written = t.import_tests([test], module, stage="draft")
+    if not written.get("ok"):
+        return jsonify({"ok": False, "error": "The recording did not make a valid test.",
+                        "errors": written.get("errors") or []}), 200
+    return jsonify({"ok": True, "module": module, "id": test["id"], "steps": len(test["steps"]),
+                    "notes": notes, "key": f"{module}|draft|{test['id']}"})
+
+
 @app.get("/api/mcp/setup")
 def mcp_setup():
     """What somebody pastes into their AI tool to connect it to this project.
@@ -3951,6 +4139,7 @@ def _shutdown(signum, _frame):
     if mock.running:
         mock.stop()
         print("mockd console: stopped the mock server")
+    recorder.stop()
     raise SystemExit(0)
 
 
@@ -3971,6 +4160,7 @@ def main():
         app.run(host=os.environ.get("CONSOLE_HOST", "127.0.0.1"), port=port,
                 threaded=True)
     finally:
+        recorder.stop()
         if mock.running:
             mock.stop()
             print("mockd console: stopped the mock server")

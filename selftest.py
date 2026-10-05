@@ -1509,7 +1509,154 @@ def group_impact():
                any(t["id"] == "reads-one" for t in removed["tests"]["affected"]))
 
 
+def group_observe():
+    """Real traffic set against the document, and the recorder that collects it."""
+    import json as _json
+    import tempfile
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from pathlib import Path
+    import observe
+    import recorder
+    import tests as t
+    from mockd import Spec
+
+    uid = {"type": "string", "format": "uuid"}
+    widget = {"type": "object", "required": ["id", "name", "size"],
+              "properties": {"id": uid, "name": {"type": "string"}, "size": {"type": "integer"}}}
+    ok = lambda sch: {"description": "ok", "content": {"application/json": {"schema": sch}}}
+    doc = {"openapi": "3.1.0", "info": {"title": "W", "version": "1"}, "paths": {
+        "/widgets": {"get": {"summary": "List widgets", "responses": {"200": ok({
+                        "type": "object", "properties": {"items": {"type": "array", "items": widget}}})}},
+                     "post": {"summary": "Add a widget", "responses": {"201": ok(widget)}}},
+        "/widgets/{widget_id}": {"get": {"summary": "Get one widget", "parameters": [
+            {"name": "widget_id", "in": "path", "required": True, "schema": uid}],
+            "responses": {"200": ok(widget), "404": {"description": "no"}}}},
+        "/never": {"get": {"responses": {"200": {"description": "ok"}}}}}}
+    spec = Spec(text=_json.dumps(doc), origin="w.json")
+    one, two = "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"
+
+    def call(method, path, status, response=None, body=None):
+        return {"method": method, "path": path, "query": {}, "request_body": body, "status": status,
+                "content_type": "application/json", "response": response}
+
+    seen = [
+        call("POST", "/widgets", 201, {"id": one, "name": "a", "size": 3}, {"name": "a"}),
+        call("GET", f"/widgets/{one}", 200, {"id": one, "name": "a", "size": "3", "colour": "red"}),
+        call("GET", f"/widgets/{one}", 200, {"id": one, "name": "a", "size": "3", "colour": "red"}),
+        call("GET", f"/widgets/{two}", 200, {"id": two, "name": "b"}),
+        call("GET", "/widgets", 500, {"oops": True}),
+        call("GET", "/internal/stats", 200, {"n": 1}),
+        call("GET", "/internal/stats", 200, {"n": 2}),
+        {**call("GET", "/docs", 200), "content_type": "text/html"},
+    ]
+    found = observe.analyse(seen, spec)
+    check("observe: an endpoint the document does not have is found, once",
+          [(e["method"], e["path"], e["calls"]) for e in found["undocumented_endpoints"]],
+          [("GET", "/internal/stats", 2)])
+    check("observe: a status it does not mention",
+          [(x["operation"], x["status"]) for x in found["undocumented_statuses"]], [("GET /widgets", 500)])
+    kinds = {(f["kind"], f["field"]) for f in found["fields"]}
+    check_true("observe: a field of the wrong type", ("type", "size") in kinds, str(kinds))
+    check_true("observe: a field that should be there and is not", ("missing", "size") in kinds, str(kinds))
+    check_true("observe: a field returned that the document leaves out", ("extra", "colour") in kinds, str(kinds))
+    check("observe: documented endpoints never called are listed", found["unused"], ["GET /never"])
+    check_true("observe: and the whole thing is one sentence",
+               "1 endpoint the document does not have" in found["sentence"]
+               and "3 of 4 documented endpoints were used" in found["sentence"], found["sentence"])
+    clean = observe.analyse([seen[0]], spec)
+    check_true("observe: a server that does what the document says is told so",
+               "did exactly what the document says" in clean["sentence"], clean["sentence"])
+
+    test, notes = observe.test_from(seen, spec, name="flow")
+    steps = test["steps"]
+    check("observe: a recording becomes a flow of its successful, documented calls",
+          [st["request"]["method"] + " " + st["request"]["path"] for st in steps],
+          ["POST /widgets", "GET /widgets/{{widgetId}}", "GET /widgets/{{knownWidgetId}}"])
+    check("observe: an id is captured from the answer that produced it",
+          steps[0].get("capture"), {"widgetId": "id"})
+    check("observe: one that came from outside the recording is kept as data",
+          test.get("data"), {"knownWidgetId": two})
+    check("observe: the result is a valid test", t.validate_test(test, "scenario"), [])
+    odd, said = observe.test_from([call("POST", "/widgets", 200, {"id": one, "name": "a", "size": 3})], spec)
+    check("observe: a status the document does not mention is not what the test expects",
+          odd["steps"][0]["assertions"][0], {"type": "status", "in": [201]})
+    check_true("observe: and the difference is said", any("does not mention" in n for n in said), str(said))
+
+    har = {"log": {"entries": [
+        {"request": {"method": "GET", "url": "https://cdn.example.test/app.js"},
+         "response": {"status": 200, "content": {"mimeType": "text/javascript", "text": "x"}}},
+        {"request": {"method": "GET", "url": f"https://api.example.test/widgets/{one}?a=1"},
+         "response": {"status": 200, "content": {"mimeType": "application/json",
+                                                 "text": _json.dumps({"id": one, "name": "a", "size": 1})}}},
+        {"request": {"method": "GET", "url": "https://api.example.test/internal/stats"},
+         "response": {"status": 200, "content": {"mimeType": "application/json", "text": "{}"}}}]}}
+    kept, host = observe.from_har(_json.dumps(har), spec)
+    check("observe: which host in a browser recording is the API is worked out", host, "api.example.test")
+    check("observe: and only its calls are kept", [e["path"] for e in kept],
+          [f"/widgets/{one}", "/internal/stats"])
+    check("observe: a recording with nothing of this API in it yields nothing",
+          observe.from_har(_json.dumps({"log": {"entries": har["log"]["entries"][:1]}}), spec), ([], None))
+
+    # the recorder, in front of a small real server
+    class Real(BaseHTTPRequestHandler):
+        got = []
+
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            Real.got.append(dict(self.headers))
+            body = _json.dumps({"path": self.path}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Set-Cookie", "sid=abc; Domain=real.example.test; Path=/")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        do_POST = do_GET
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Real)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "rec.jsonl"
+            app = recorder.build_app(f"http://127.0.0.1:{server.server_port}", out,
+                                     sign_in=lambda: {"Authorization": "Bearer secret-123"})
+            c = app.test_client()
+            got = c.get("/things?x=1")
+            check("recorder: a call is passed through and answered by the real server",
+                  (got.status_code, got.get_json()), (200, {"path": "/things?x=1"}))
+            check("recorder: one that brings no credentials is signed in",
+                  Real.got[-1].get("Authorization"), "Bearer secret-123")
+            c.get("/things", headers={"Authorization": "Bearer mine"})
+            check("recorder: one that brings its own keeps them",
+                  Real.got[-1].get("Authorization"), "Bearer mine")
+            check_true("recorder: a cookie is handed back without the server's domain on it",
+                       "Domain" not in (got.headers.get("Set-Cookie") or "x")
+                       and "sid=abc" in (got.headers.get("Set-Cookie") or ""),
+                       got.headers.get("Set-Cookie"))
+            written = out.read_text()
+            check("recorder: each exchange is written down", len(written.splitlines()), 2)
+            check_true("recorder: with no credential in it",
+                       "secret-123" not in written and "Bearer" not in written and "mine" not in written)
+            check("recorder: and what it wrote is what observe reads",
+                  [e["path"] for e in observe.load(out)], ["/things", "/things"])
+
+            guarded = recorder.build_app(f"http://127.0.0.1:{server.server_port}",
+                                         Path(tmp) / "ro.jsonl", read_only=True, label="prod")
+            before = len(Real.got)
+            refused = guarded.test_client().post("/things", json={"a": 1})
+            check("recorder: a write to a read-only server is refused", refused.status_code, 403)
+            check("recorder: and never reaches it", len(Real.got), before)
+            check("recorder: a read still goes through", guarded.test_client().get("/x").status_code, 200)
+    finally:
+        server.shutdown()
+
+
 GROUPS = {
+    "observe": group_observe,
     "impact": group_impact,
     "needs": group_needs,
     "mcp": group_mcp,

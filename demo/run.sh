@@ -26,7 +26,7 @@ fi
 
 SANITY="e2e toast home impact"
 TESTS="workbench wbasserts oppicker selectors pipeline library openload scoped envalign visible report assert runnow chain lifecycle record baseline create list bug mcp needs"
-SPEC="specpick projectspec compare discover params newenv envlogin servers document"
+SPEC="specpick projectspec compare discover params newenv envlogin servers document watch"
 MISC="picker progress splice envvars reveal"
 
 case "${1:-sanity}" in

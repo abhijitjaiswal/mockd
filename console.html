@@ -367,6 +367,15 @@
             margin-bottom:11px;background:var(--bg)}
   .stepedit h5{margin:0 0 7px;font-size:12px;font-weight:650;display:flex;gap:8px;
                align-items:center}
+  .watchline{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .watchline select{width:auto}
+  .watchon{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 12px;
+           border:1px solid #a6f4c5;background:#f6fef9;border-radius:8px}
+  .watchon code{font-size:13px}
+  .watchfound{margin-top:12px;padding-top:12px;border-top:1px solid var(--line);font-size:13px}
+  .watchfound .line{padding:2px 0;font-size:12.5px}
+  .watchfound .k{font-weight:700;font-size:11px;margin-right:6px;color:var(--err)}
+  .watchfound .k.extra{color:#b25e00}
   .noticed{display:flex;gap:12px;align-items:flex-start;padding:11px 2px;
            border-bottom:1px solid var(--line)}
   .noticed:last-child{border-bottom:0}
@@ -1235,6 +1244,15 @@
         <div id="srvForm" hidden></div>
         <div id="srvList"><span class="hint">Loading…</span></div>
         <p class="hint" id="srvNote" style="margin-bottom:0"></p>
+      </div>
+    </div>
+
+    <div class="card" id="watchCard">
+      <h3>Learn from real traffic</h3>
+      <div class="body">
+        <div id="watchIdle"></div>
+        <div id="watchFound"></div>
+        <input type="file" id="watchHar" accept=".har,.json" hidden>
       </div>
     </div>
 

@@ -65,7 +65,9 @@ process.on("exit", () => {
     [...document.querySelectorAll('.view[data-view="environments"] button, '
       + '.view[data-view="environments"] input, .view[data-view="environments"] select')]
       .filter((el) => el.offsetParent !== null && !el.closest(".srvrow")).length);
-  check("and there are only two controls besides the rows", controls <= 2, String(controls));
+  // Add a server and Advanced, plus the one card for watching real traffic:
+  // which server, start, or load a recording
+  check("and there are only five controls besides the rows", controls <= 5, String(controls));
 
   // ----------------------------------------------------- test connection
   await p.locator('.srvrow[data-srv="mock"] [data-srvtest]').click();

@@ -28,6 +28,7 @@ function showView(name) {
     a.classList.toggle("on", a.dataset.view === name));
   location.hash = name;
   window.scrollTo(0, 0);
+  if (name === "environments") watchLoad();
   if (name === "tests") { loadTests(); fillTestSelectors(); fillTypeList();
                          loadBindings(); fillBindSuites(); loadBaseline(); }
   if (name === "home") homeLoad();
@@ -3829,6 +3830,109 @@ $("srvAdd").addEventListener("click", () => {
       else banner("ok", `${name} added. It still needs ${(now && now.needs || []).join(", ")} — press Finish setup.`);
     } finally { if ($("srvCreate")) $("srvCreate").disabled = false; }
   };
+});
+
+/* ------------------------------------------------------------- watching
+   The document says what the API should do; only traffic says what it does.
+   Point an app at the address given and use it as normal: everything is
+   passed through to the real server, and where the server and the document
+   disagree is worked out here, without anybody reading a log. */
+let WATCH_TIMER = null;
+
+async function watchLoad() {
+  if (!$("watchCard")) return;
+  let d;
+  try { ({ data: d } = await api("/api/record")); } catch { return; }
+  const servers = d.servers || [];
+  $("watchIdle").innerHTML = d.watching ? `
+    <div class="watchon">
+      <span>Watching <b>${esc(d.server)}</b>. Point your app at <code>${esc(d.address)}</code>
+        instead of the server and use it as normal.</span>
+      <span class="grow"></span><b id="watchCount">${d.calls} call${d.calls === 1 ? "" : "s"} so far</b>
+      <button class="sm" id="watchStop">Stop</button>
+    </div>` : `
+    <p class="hint" style="margin-top:0">Let mockd watch your app talk to the real API. It passes
+      everything through, and tells you where the API and the document disagree, which endpoints
+      the app really uses — and can turn what you clicked through into a test.</p>
+    <div class="watchline">
+      ${servers.length ? `<select id="watchServer">${servers.map((s) =>
+          `<option value="${esc(s.name)}">${esc(s.name)}${s.read_only ? " — read only" : ""}</option>`).join("")}</select>
+        <button class="primary sm" id="watchStart">Start watching</button>
+        <span class="hint">or</span>` : '<span class="hint">Add a server above to watch it live, or</span>'}
+      <button class="sm" id="watchLoadHar">Load a browser recording…</button>
+    </div>`;
+  if ($("watchStart")) $("watchStart").onclick = async () => {
+    $("watchStart").disabled = true;
+    const { data } = await api("/api/record/start", { method: "POST",
+      body: JSON.stringify({ server: $("watchServer").value }) });
+    if (!data.ok) { banner("err", data.error || "could not start"); $("watchStart").disabled = false; return; }
+    banner("ok", `Watching ${data.server}. Point your app at ${data.address}.`);
+    watchLoad();
+  };
+  if ($("watchStop")) $("watchStop").onclick = async () => {
+    await api("/api/record/stop", { method: "POST" });
+    banner("ok", "Stopped watching.");
+    watchLoad();
+  };
+  if ($("watchLoadHar")) $("watchLoadHar").onclick = () => $("watchHar").click();
+
+  const f = d.found;
+  const KIND = { missing: "missing", type: "wrong type", differs: "differs", extra: "not documented" };
+  const lines = !f ? [] : [
+    ...(f.undocumented_endpoints || []).map((x) =>
+      `<div class="line"><span class="k">not in the document</span><code>${esc(x.method)} ${esc(x.path)}</code>
+         <span class="hint">· called ${x.calls} time${x.calls === 1 ? "" : "s"}</span></div>`),
+    ...(f.undocumented_statuses || []).map((x) =>
+      `<div class="line"><span class="k">status not mentioned</span><code>${esc(x.operation)}</code> answered <b>${esc(x.status)}</b></div>`),
+    ...(f.fields || []).map((x) =>
+      `<div class="line"><span class="k ${esc(x.kind)}">${esc(KIND[x.kind] || x.kind)}</span><code>${esc(x.operation)}</code>
+         → <b>${esc(x.field)}</b> <span class="hint">· ${esc(x.detail)}</span></div>`)];
+  $("watchFound").innerHTML = !f ? "" : `
+    <div class="watchfound">
+      <div><b>${esc((f.meta || {}).server || "What was recorded")}:</b> ${esc(f.sentence)}</div>
+      ${lines.length ? `<details style="margin-top:6px"${lines.length <= 6 ? " open" : ""}>
+          <summary style="cursor:pointer">Where they disagree</summary>${lines.slice(0, 30).join("")}
+          ${lines.length > 30 ? `<div class="hint">…and ${lines.length - 30} more.</div>` : ""}</details>` : ""}
+      ${(f.unused || []).length ? `<details style="margin-top:4px">
+          <summary style="cursor:pointer">${f.unused.length} documented endpoint${f.unused.length === 1 ? " was" : "s were"} never called</summary>
+          ${f.unused.slice(0, 40).map((o) => `<div class="line"><code>${esc(o)}</code></div>`).join("")}</details>` : ""}
+      <div class="btnrow" style="margin-top:10px">
+        <button class="sm primary" id="watchTest">Make a test from this</button>
+        <button class="sm" id="watchClear">Clear</button>
+      </div>
+    </div>`;
+  if ($("watchTest")) $("watchTest").onclick = async () => {
+    $("watchTest").disabled = true;
+    const { data } = await api("/api/record/test", { method: "POST" });
+    if (!data.ok) { banner("err", data.error || "could not make a test"); $("watchTest").disabled = false; return; }
+    banner("ok", `Saved a ${data.steps}-step test from what was recorded.`);
+    await loadTests();
+    LIB.only = { keys: new Set([data.key]), label: "made from the recording" };
+    LIB.q = ""; LIB.module = ""; LIB.type = ""; LIB.priority = ""; LIB.result = ""; LIB.page = 0;
+    $("libSearch").value = ""; LIB.open = data.key;
+    showView("tests");
+  };
+  if ($("watchClear")) $("watchClear").onclick = async () => {
+    await api("/api/record/clear", { method: "POST" });
+    watchLoad();
+  };
+
+  clearTimeout(WATCH_TIMER);
+  if (d.watching && document.querySelector('.view[data-view="environments"]').classList.contains("on")) {
+    WATCH_TIMER = setTimeout(watchLoad, 3000);
+  }
+}
+
+$("watchHar").addEventListener("change", async (ev) => {
+  const file = ev.target.files[0];
+  if (!file) return;
+  banner("ok", `Reading ${file.name}…`);
+  const { data } = await api("/api/record/har", { method: "POST",
+    body: JSON.stringify({ content: await file.text(), name: file.name }) });
+  ev.target.value = "";
+  if (!data.ok) { banner("err", data.error || "could not read it"); return; }
+  banner("ok", `${data.calls} call${data.calls === 1 ? "" : "s"} to ${data.host} read from that recording.`);
+  watchLoad();
 });
 
 /* ------------------------------------------------------------- noticed
