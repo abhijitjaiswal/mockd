@@ -853,8 +853,8 @@ async function followJob(jobId, pre, elapsed, cancelBtn, onDone, rowsEl, progres
 let SUGGESTED = null;
 
 async function loadTests() {
-  await trackerLoad();
-  const { data } = await api("/api/tests");
+  // side by side: the list should not wait on knowing where bug reports go
+  const [{ data }] = await Promise.all([api("/api/tests"), trackerLoad()]);
   // reassigned below when a label is selected — `const` here threw on every
   // click, which aborted the redraw and made the filter look like it did nothing
   let suites = data.suites || [];
@@ -3843,9 +3843,16 @@ async function trackerLoad() {
   try { TRACKER = ((await api("/api/tracker")).data || {}).connection || null; } catch { TRACKER = null; }
 }
 
-function trackerForm(host, test) {
+/* Where a row's extra content lives, looked up when it is needed: the list is
+   redrawn whenever a run finishes, and an element held on to from before
+   that is no longer on the page. */
+const trackerHost = (test) => $("libList").querySelector(
+  `[data-libhost="${CSS.escape(`${test.suite}|${test.stage}|${test.id}`)}"]`);
+
+function trackerForm(test) {
+  const host = trackerHost(test);
   if (!host) return;
-  host.innerHTML = `<div class="czneed" data-trackerform>
+  host.innerHTML = `<div class="czneed" data-trackerform data-keep>
     <b>Where should bug reports go?</b>
     <div class="hint" style="margin:3px 0 7px">Paste the address of your Jira project, GitHub or GitLab
       repository, or a Slack or Teams channel's webhook. This is asked once.</div>
@@ -3879,7 +3886,7 @@ function trackerForm(host, test) {
     go.disabled = !!data.project_missing;
   };
   addr.addEventListener("input", () => { chosen = ""; clearTimeout(timer); timer = setTimeout(look, 350); });
-  host.querySelector("[data-trcancel]").onclick = () => { host.innerHTML = ""; };
+  host.querySelector("[data-trcancel]").onclick = () => { const now = trackerHost(test); if (now) now.innerHTML = ""; };
   go.onclick = async () => {
     const secrets = {};
     more.querySelectorAll("[data-trneed]").forEach((el) => { secrets[el.dataset.trneed] = el.value.trim(); });
@@ -3888,41 +3895,44 @@ function trackerForm(host, test) {
       body: JSON.stringify({ address: addr.value.trim(), kind: chosen || undefined, secrets }) });
     if (!data.ok) { banner("err", data.error || "could not connect"); go.disabled = false; return; }
     TRACKER = data.connection;
-    await trackerSend(host, test, false);
+    await trackerSend(test, false);
   };
   addr.focus();
 }
 
-async function trackerSend(host, test, again, button) {
+async function trackerSend(test, again, button) {
   if (button) { button.disabled = true; button.textContent = "Sending…"; }
   const { data } = await api("/api/tests/bug/send", { method: "POST",
     body: JSON.stringify({ ...test, env: $("libEnv").value || "mock", again: !!again }) });
+  const host = trackerHost(test);
   if (data.already && host) {
-    host.innerHTML = `<div class="czneed">This failure was already raised as <b>${esc(data.already)}</b>.
+    host.innerHTML = `<div class="czneed" data-keep>This failure was already raised as <b>${esc(data.already)}</b>.
       <div class="btnrow" style="margin-top:7px"><button class="sm" data-tragain>Send it again anyway</button></div></div>`;
-    host.querySelector("[data-tragain]").onclick = () => trackerSend(host, test, true);
+    host.querySelector("[data-tragain]").onclick = () => trackerSend(test, true);
     if (button) { button.disabled = false; button.textContent = `Send to ${TRACKER ? TRACKER.name : "…"}`; }
     return;
   }
   if (!data.ok) {
     banner("err", data.error || "could not send it");
-    if (host) host.innerHTML = `<div class="czneed">${esc(data.error || "It could not be sent.")}
+    if (host) host.innerHTML = `<div class="czneed" data-keep>${esc(data.error || "It could not be sent.")}
       <div class="btnrow" style="margin-top:7px"><button class="sm" data-trchange>Connect somewhere else</button></div></div>`;
     const change = host && host.querySelector("[data-trchange]");
-    if (change) change.onclick = () => trackerForm(host, test);
+    if (change) change.onclick = () => trackerForm(test);
     if (button) { button.disabled = false; button.textContent = `Send to ${TRACKER ? TRACKER.name : "…"}`; }
     return;
   }
   banner("ok", data.message);
   await loadTests();
-  const fresh = $("libList").querySelector(`[data-libhost="${CSS.escape(`${test.suite}|${test.stage}|${test.id}`)}"]`);
+  const fresh = trackerHost(test);
   if (fresh) {
     fresh.innerHTML = `<div class="czneed" data-trsent>${esc(data.message)}
       ${data.url ? ` <a href="${esc(data.url)}" target="_blank" rel="noopener">Open it</a>` : ""}
       ${data.linked ? ' <span class="hint">· kept on this test under Linked</span>' : ""}
       <div class="btnrow" style="margin-top:7px"><button class="sm" data-trchange>Send somewhere else next time</button></div></div>`;
     fresh.querySelector("[data-trchange]").onclick = async () => {
-      await api("/api/tracker/forget", { method: "POST" }); TRACKER = null; libRender();
+      await api("/api/tracker/forget", { method: "POST" }); TRACKER = null;
+      const now = trackerHost(test); if (now) now.innerHTML = "";
+      libRender();
     };
   }
 }
@@ -4313,6 +4323,17 @@ function libRender() {
     : `Run these ${shown.length}`;
   $("libRun").disabled = !shown.length;
 
+  // The list is redrawn whenever a run finishes or a test is saved, which can
+  // be a second after somebody opened a form in a row. A form that vanishes
+  // while it is being typed into is worse than a stale row, so anything marked
+  // as in progress is lifted out and put back.
+  const inProgress = {};
+  $("libList").querySelectorAll("[data-libhost]").forEach((h) => {
+    if (!h.querySelector(":scope > [data-keep]")) return;
+    const held = document.createDocumentFragment();
+    while (h.firstChild) held.appendChild(h.firstChild);
+    inProgress[h.dataset.libhost] = held;
+  });
   const WORD = { pass: "passes", fail: "does not pass", never: "not run yet" };
   $("libList").innerHTML = slice.length ? slice.map((t) => {
     const key = `${t.suite}|${t.stage}|${t.id}`;
@@ -4380,6 +4401,11 @@ function libRender() {
       ? "Nothing matches those filters."
       : "No tests yet. Start the mock for a baseline, or use Create tests."}</div>`;
 
+  Object.entries(inProgress).forEach(([key, held]) => {
+    const h = $("libList").querySelector(`[data-libhost="${CSS.escape(key)}"]`);
+    if (h) h.appendChild(held);
+  });
+
   $("libPager").innerHTML = pages > 1 ? `
     <button class="sm" data-libpage="${LIB.page - 1}" ${LIB.page ? "" : "disabled"}>‹ Previous</button>
     <span class="hint">${LIB.page * LIB_PAGE + 1}–${Math.min((LIB.page + 1) * LIB_PAGE, shown.length)}
@@ -4442,9 +4468,8 @@ function libRender() {
         return;
       }
       if (b.dataset.libact === "send") {
-        const host = $("libList").querySelector(`[data-libhost="${CSS.escape(b.dataset.key)}"]`);
-        if (!TRACKER) { trackerForm(host, { suite, stage, id }); return; }
-        trackerSend(host, { suite, stage, id }, false, b);
+        if (!TRACKER) { trackerForm({ suite, stage, id }); return; }
+        trackerSend({ suite, stage, id }, false, b);
         return;
       }
       if (b.dataset.libact === "delete" && !b.dataset.sure) {
