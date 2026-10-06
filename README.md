@@ -11,7 +11,7 @@ matching what was agreed.
 
 ![mockd used end to end, with a caption for each step](docs/recordings/mockd-end-to-end.gif)
 
-*3 min 43 s, against an API it had never seen — [download the video](docs/recordings/mockd-end-to-end.mp4)*
+*5 min 6 s, against an API it had never seen — [download the video](docs/recordings/mockd-end-to-end.mp4)*
 
 ## What you get
 
