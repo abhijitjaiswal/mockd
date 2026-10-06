@@ -458,7 +458,11 @@ def remember_document_change(before, after):
     switch itself: a comparison that cannot be made is simply not remembered."""
     try:
         found = document_impact(before, after)
-        if found["identical"]:
+        # Worth remembering only when a test is affected: that is the thing to
+        # do about it. Moving off the built-in sample, or off a document nothing
+        # tests yet, changes nothing anybody has — and the impact was already
+        # said where the document was loaded.
+        if found["identical"] or not found["tests"]["affected"]:
             CHANGE_FILE.unlink(missing_ok=True)
             return
         LOG_DIR.mkdir(exist_ok=True)
@@ -518,9 +522,8 @@ def noticed():
                 waiting.append(f"{test['suite']}|{test['stage']}|{test['id']}")
         counts = change.get("counts") or {}
         # Dealt with once every test it reaches has been run again — what those
-        # runs found then shows up as failures, below. A breaking change that
-        # reaches no test at all is still said once, until put away.
-        if waiting or (counts.get("breaking") and not change.get("tests")):
+        # runs found then shows up as failures, below.
+        if waiting:
             out.append({
                 "key": "document-changed", "level": "act" if counts.get("breaking") else "look",
                 "title": "The API document changed",

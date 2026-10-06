@@ -91,11 +91,11 @@ A small sample API is included, so you can look around before adding your own.
 
 | | |
 |---|---|
-| **Home** | where things stand, and the one thing to do next |
+| **Home** | the map of your API, what mockd noticed, where things stand, and the one thing to do next |
 | **Create tests** | a sentence in, tests out — validated, saved and tried |
-| **Tests** | every test in one list: search, filter, pick a server, run, report |
+| **Tests** | every test in one list: search, filter, pick a server, run, run under load, report, send a failure to your tracker |
 | **API document** | which document is in use, and one box to bring in another |
-| **Servers** | the mock and your servers; add one and test the connection |
+| **Servers** | the mock and your servers; add one and test the connection; watch real traffic |
 
 Each opens on the simple thing. The technical tools are folded under
 **Advanced** and **More**.
